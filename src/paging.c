@@ -32,17 +32,17 @@ int paging_create_user_space(user_space_t *s){
     if(!(kpml4[0]&ATM_PTE_P) || !kpdpt) return -1;
 
     s->pml4=page_alloc(); s->pdpt=page_alloc(); s->user_pt=page_alloc();
-    if(!s->pml4||!s->pdpt||!s->user_pt) return -1;
+    if(!s->pml4||!s->pdpt||!s->user_pt){ paging_destroy_user_space(s); return -1; }
     for(int i=0;i<4;i++){
         s->pd[i]=page_alloc();
-        if(!s->pd[i]) return -1;
+        if(!s->pd[i]){ paging_destroy_user_space(s); return -1; }
     }
 
     kmemcpy(s->pml4,kpml4,ATM_PAGE_SIZE);
     kmemcpy(s->pdpt,kpdpt,ATM_PAGE_SIZE);
     for(int i=0;i<4;i++){
         uint64_t e=kpdpt[i];
-        if(!(e&ATM_PTE_P)) return -1;
+        if(!(e&ATM_PTE_P)){ paging_destroy_user_space(s); return -1; }
         uint64_t *kpd=phys_ptr(e);
         kmemcpy(s->pd[i],kpd,ATM_PAGE_SIZE);
         s->pdpt[i]=((uint64_t)(uintptr_t)s->pd[i]&ATM_PAGE_MASK)|ATM_PTE_P|ATM_PTE_W;
@@ -69,6 +69,30 @@ int paging_unmap_user_page(user_space_t *s,uint64_t va){
     if(!s||!s->valid||!user_window(va)||(va&0xfff)) return -1;
     s->user_pt[(va>>12)&0x1ffULL]=0;
     return 0;
+}
+
+uint64_t paging_user_mapped_bytes(const user_space_t *s){
+    if(!s || !s->valid || !s->user_pt) return 0;
+    uint64_t pages=0;
+    for(uint64_t i=0;i<512;i++) if(s->user_pt[i]&ATM_PTE_P) pages++;
+    return pages*ATM_PAGE_SIZE;
+}
+
+void paging_destroy_user_space(user_space_t *s){
+    if(!s) return;
+    /* Native ELF pages are retained until waitpid() so an exiting CPL 3 task
+     * never frees its active CR3. Reaping calls this after it is off-CPU. */
+    if(s->user_pt){
+        for(uint64_t i=0;i<512;i++){
+            uint64_t entry=s->user_pt[i];
+            if(entry&ATM_PTE_P) kfree((void *)(uintptr_t)(entry&ATM_PAGE_MASK));
+        }
+        kfree(s->user_pt);
+    }
+    for(int i=0;i<4;i++) if(s->pd[i]) kfree(s->pd[i]);
+    if(s->pdpt) kfree(s->pdpt);
+    if(s->pml4) kfree(s->pml4);
+    kmemset(s,0,sizeof(*s));
 }
 
 int paging_user_translate(const user_space_t *s,uint64_t va,uintptr_t *phys,uint64_t *flags){
@@ -98,12 +122,20 @@ int paging_user_range(const user_space_t *s,uint64_t va,size_t size,int write){
 int paging_selftest(void){
     user_space_t s;
     uint8_t *page=(uint8_t *)kmalloc_aligned(ATM_PAGE_SIZE,ATM_PAGE_SIZE);
-    if(!page||paging_create_user_space(&s)<0) return -1;
-    if(paging_map_user_page(&s,ATM_USER_BASE,(uintptr_t)page,ATM_PTE_W)<0) return -1;
+    int mapped=0,rc=-1;
+    if(!page) return -1;
+    if(paging_create_user_space(&s)<0){ kfree(page); return -1; }
+    if(paging_map_user_page(&s,ATM_USER_BASE,(uintptr_t)page,ATM_PTE_W)<0) goto done;
+    mapped=1;
     uintptr_t p=0; uint64_t f=0;
-    if(paging_user_translate(&s,ATM_USER_BASE+37,&p,&f)<0) return -1;
-    if(p!=(uintptr_t)page+37 || !(f&ATM_PTE_W)) return -1;
-    if(paging_user_range(&s,ATM_USER_BASE,128,1)<0) return -1;
-    if(paging_unmap_user_page(&s,ATM_USER_BASE)<0) return -1;
-    return paging_user_range(&s,ATM_USER_BASE,1,0)<0?0:-1;
+    if(paging_user_translate(&s,ATM_USER_BASE+37,&p,&f)<0) goto done;
+    if(p!=(uintptr_t)page+37 || !(f&ATM_PTE_W)) goto done;
+    if(paging_user_range(&s,ATM_USER_BASE,128,1)<0) goto done;
+    if(paging_unmap_user_page(&s,ATM_USER_BASE)<0) goto done;
+    mapped=0;
+    rc=paging_user_range(&s,ATM_USER_BASE,1,0)<0?0:-1;
+done:
+    paging_destroy_user_space(&s);
+    if(!mapped) kfree(page);
+    return rc;
 }

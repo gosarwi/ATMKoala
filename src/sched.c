@@ -100,6 +100,8 @@ void sched_init(void) {
     kstrcpy(idle->name, "idle");
     idle->state    = TASK_READY;
     idle->priority = 1;
+    idle->created_ticks=0;
+    idle->state_changed_ticks=0;
     idle->stack_base = NULL;  /* uses boot stack */
 
     /* Current context becomes idle — will be filled on first switch */
@@ -127,6 +129,12 @@ task_t *task_create(const char *name, task_fn_t fn, uint32_t priority) {
     t->stack_base = stack;
     t->stack_size = TASK_STACK_SIZE;
     t->ticks      = 0;
+    t->created_ticks=uptime_ticks;
+    t->state_changed_ticks=uptime_ticks;
+    t->resident_bytes=TASK_STACK_SIZE;
+    t->io_read_bytes=0;
+    t->io_write_bytes=0;
+    t->context_switches=0;
     t->exit_code  = 0;
 
     /* Set up initial context for context_switch (x86-64).
@@ -161,6 +169,7 @@ void task_exit(int code) {
     __asm__ volatile("cli");
     if (!current_task || current_task->pid == 0) return;
     current_task->state     = TASK_ZOMBIE;
+    current_task->state_changed_ticks=uptime_ticks;
     current_task->exit_code = code;
     native_fd_task_cleanup(current_task);
     queue_remove(current_task);
@@ -178,6 +187,7 @@ __attribute__((noreturn)) void task_exit_from_syscall(int code) {
     task_t *old=current_task;
     if(!old || old->pid==0) for(;;) __asm__ volatile("hlt");
     old->state=TASK_ZOMBIE;
+    old->state_changed_ticks=uptime_ticks;
     old->exit_code=code;
     native_fd_task_cleanup(old);
     queue_remove(old);
@@ -194,7 +204,8 @@ __attribute__((noreturn)) void task_exit_from_syscall(int code) {
     if(!next) next=&task_pool[0];
     current_task=next;
     next->state=TASK_RUNNING;
-    next->ticks++;
+    next->state_changed_ticks=uptime_ticks;
+    next->context_switches++;
     context_switch(&old->ctx,&next->ctx);
     for(;;) __asm__ volatile("hlt");
 }
@@ -205,7 +216,10 @@ int task_kill(uint32_t pid, int code) {
     task_t *target=NULL;
     for (int i=0;i<TASK_MAX;i++) if (task_pool[i].state!=TASK_UNUSED && task_pool[i].pid==pid) { target=&task_pool[i]; break; }
     if (!target || target==current_task) { __asm__ volatile("sti"); return -1; }
-    target->state=TASK_ZOMBIE; target->exit_code=code;
+    target->state=TASK_ZOMBIE;
+    target->state_changed_ticks=uptime_ticks;
+    target->exit_code=code;
+    native_fd_task_cleanup(target);
     queue_remove(target);
     /* Retain the zombie for waitpid. */
     __asm__ volatile("sti");
@@ -221,6 +235,11 @@ int task_waitpid(uint32_t pid,int *status) {
         if(t->state!=TASK_ZOMBIE) return 0;
         if(status) *status=t->exit_code;
         uint32_t reaped=t->pid;
+        if(t->address_space){
+            user_space_t *space=(user_space_t *)t->address_space;
+            paging_destroy_user_space(space);
+            kfree(space);
+        }
         if(t->stack_base) kfree(t->stack_base);
         kmemset(t,0,sizeof(*t));
         return (int)reaped;
@@ -250,6 +269,7 @@ void task_block(void) {
     __asm__ volatile("cli");
     if (current_task) {
         current_task->state = TASK_BLOCKED;
+        current_task->state_changed_ticks=uptime_ticks;
         queue_remove(current_task);
     }
     __asm__ volatile("sti");
@@ -259,7 +279,8 @@ void task_block(void) {
 void task_unblock(task_t *t) {
     if (!t || t->state != TASK_BLOCKED) return;
     t->state = TASK_READY;
-    if(queue_add(t)<0) t->state=TASK_BLOCKED;
+    t->state_changed_ticks=uptime_ticks;
+    if(queue_add(t)<0) { t->state=TASK_BLOCKED; t->state_changed_ticks=uptime_ticks; }
 }
 
 /* ── sched_tick — called from PIT ISR ─────────────────────── */
@@ -267,6 +288,7 @@ static uint32_t quantum_counter = 0;
 
 void sched_tick(void) {
     uptime_ticks++;
+    if(current_task) current_task->ticks++;
     if(!current_task || current_task->pid==0) idle_ticks++;
 
     if (!run_queue_head) {
@@ -274,7 +296,7 @@ void sched_tick(void) {
          * boot/idle context saved by its original task_yield(). */
         if(current_task && current_task->pid!=0 && current_task->state==TASK_ZOMBIE){
             task_t *old=current_task, *idle=&task_pool[0];
-            current_task=idle; idle->state=TASK_RUNNING;
+            current_task=idle; idle->state=TASK_RUNNING; idle->state_changed_ticks=uptime_ticks; idle->context_switches++;
             context_switch(&old->ctx,&idle->ctx);
         }
         return;
@@ -302,7 +324,8 @@ void sched_tick(void) {
 
     current_task        = next;
     current_task->state = TASK_RUNNING;
-    current_task->ticks++;
+    current_task->state_changed_ticks=uptime_ticks;
+    current_task->context_switches++;
 
     context_switch(&old->ctx, &current_task->ctx);
 }
@@ -312,6 +335,14 @@ task_t *sched_current(void) { return current_task; }
 uint32_t sched_uptime_ticks(void) { return uptime_ticks; }
 uint32_t sched_idle_ticks(void) { return idle_ticks; }
 uint32_t sched_task_count(void) { uint32_t n=0; for(int i=0;i<TASK_MAX;i++)if(task_pool[i].state!=TASK_UNUSED&&task_pool[i].pid!=0)n++; return n; }
+uint64_t sched_total_resident_bytes(void){uint64_t total=0;for(int i=0;i<TASK_MAX;i++)if(task_pool[i].state!=TASK_UNUSED)total+=task_pool[i].resident_bytes;return total;}
+uint64_t sched_busy_ticks(void){return uptime_ticks>=idle_ticks?(uint64_t)(uptime_ticks-idle_ticks):0;}
+int sched_task_info(uint32_t slot,sched_task_info_t *out){
+    if(!out || slot>=TASK_MAX || task_pool[slot].state==TASK_UNUSED) return -1;
+    task_t *t=&task_pool[slot];kmemset(out,0,sizeof(*out));
+    out->pid=t->pid;out->ppid=t->ppid;out->uid=t->uid;out->gid=t->gid;out->state=t->state;out->priority=t->priority;out->context_switches=t->context_switches;
+    out->cpu_ticks=t->ticks;out->created_ticks=t->created_ticks;out->state_changed_ticks=t->state_changed_ticks;out->resident_bytes=t->resident_bytes;out->io_read_bytes=t->io_read_bytes;out->io_write_bytes=t->io_write_bytes;kstrcpy(out->name,t->name);return 0;
+}
 
 /* ── ps — print task list ──────────────────────────────────── */
 static const char *state_name(task_state_t s) {
@@ -325,26 +356,23 @@ static const char *state_name(task_state_t s) {
 }
 
 void sched_print_tasks(void) {
-    char buf[16];
-    terminal_writeln("PID  PPID UID:GID STATE    PRI  TICKS  NAME");
-    terminal_writeln("---  ---- ------- ------- ---  -----  ----");
-    for (int i = 0; i < TASK_MAX; i++) {
-        task_t *t = &task_pool[i];
-        if (t->state == TASK_UNUSED) continue;
-        kuitoa(t->pid,      buf, 10); terminal_write(buf);
-        terminal_write("    ");
-        kuitoa(t->ppid,     buf, 10); terminal_write(buf);
-        terminal_write("    ");
-        kuitoa(t->uid,      buf, 10); terminal_write(buf);
-        terminal_write(":");
-        kuitoa(t->gid,      buf, 10); terminal_write(buf);
-        terminal_write("    ");
-        terminal_write(state_name(t->state));
-        terminal_write("  ");
-        kuitoa(t->priority, buf, 10); terminal_write(buf);
-        terminal_write("    ");
-        kuitoa(t->ticks,    buf, 10); terminal_write(buf);
-        terminal_write("  ");
-        terminal_writeln(t->name);
+    char buf[24];
+    terminal_writeln("PID PPID UID:GID STATE    PRI CPUtk MEMB RD WR SW NAME");
+    terminal_writeln("--- ---- ------- ------- --- ----- ---- -- -- -- ----");
+    for (uint32_t i = 0; i < TASK_MAX; i++) {
+        sched_task_info_t info;
+        if(sched_task_info(i,&info)<0) continue;
+        kuitoa(info.pid,buf,10); terminal_write(buf); terminal_write("    ");
+        kuitoa(info.ppid,buf,10); terminal_write(buf); terminal_write("    ");
+        kuitoa(info.uid,buf,10); terminal_write(buf); terminal_write(":");
+        kuitoa(info.gid,buf,10); terminal_write(buf); terminal_write("    ");
+        terminal_write(state_name(info.state)); terminal_write("  ");
+        kuitoa(info.priority,buf,10); terminal_write(buf); terminal_write("  ");
+        ku64toa(info.cpu_ticks,buf,10); terminal_write(buf); terminal_write("  ");
+        ku64toa(info.resident_bytes,buf,10); terminal_write(buf); terminal_write("  ");
+        ku64toa(info.io_read_bytes,buf,10); terminal_write(buf); terminal_write("  ");
+        ku64toa(info.io_write_bytes,buf,10); terminal_write(buf); terminal_write("  ");
+        kuitoa(info.context_switches,buf,10); terminal_write(buf); terminal_write("  ");
+        terminal_writeln(info.name);
     }
 }

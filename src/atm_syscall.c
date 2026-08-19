@@ -266,5 +266,6 @@ done:
     kmemcpy(task->fd_map,saved_map,sizeof(saved_map));
     kmemcpy(task->socket_map,saved_socket_map,sizeof(saved_socket_map));
     task->fd_table_ready=saved_fd_ready;
+    paging_destroy_user_space(&space);
     return rc;
 }

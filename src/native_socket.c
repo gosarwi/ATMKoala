@@ -30,7 +30,8 @@ int native_socket_open(task_t *t,int domain,int type,int protocol){
     if(!t||!t->fd_table_ready||domain!=ATM_AF_INET||type!=ATM_SOCK_STREAM||protocol!=ATM_IPPROTO_TCP)return -1;
     int fd=-1,slot=-1; for(int i=3;i<TASK_FD_MAX;i++)if(t->fd_map[i]<0&&t->socket_map[i]<0){fd=i;break;}
     for(int i=0;i<ATM_SOCKET_MAX;i++)if(!slots[i].used){slot=i;break;}
-    if(fd<0||slot<0)return -1; kmemset(&slots[slot],0,sizeof(slots[slot]));slots[slot].owner=t;slots[slot].used=1;t->socket_map[fd]=slot;return fd;
+    if(fd<0||slot<0)return -1;
+    kmemset(&slots[slot],0,sizeof(slots[slot]));slots[slot].owner=t;slots[slot].used=1;t->socket_map[fd]=slot;return fd;
 }
 int native_socket_connect(task_t *t,int fd,const atm_sockaddr_in_t *a,uint32_t timeout){
     socket_slot_t *s=slot_for(t,fd); if(!s||!a||a->family!=ATM_AF_INET)return -1;

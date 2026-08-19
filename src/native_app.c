@@ -48,27 +48,33 @@ int native_app_spawn_memory(const char *name,const uint8_t *image,
     if(!image || !image_size || image_size>ATM_NATIVE_MAX_IMAGE || !usermode_gate_ready()) return -1;
     user_space_t *space=(user_space_t *)kmalloc(sizeof(*space));
     elf64_user_image_t loaded;
-    if(!space || paging_create_user_space(space)<0 || elf64_load_user(image,image_size,space,&loaded)<0) return -1;
+    if(!space) return -1;
+    if(paging_create_user_space(space)<0 || elf64_load_user(image,image_size,space,&loaded)<0){
+        paging_destroy_user_space(space); kfree(space); return -1;
+    }
     /* Static startup layout: argc=0, argv=NULL, envp=NULL, auxv terminator.
      * It is 16-byte aligned and deliberately compact until execve provides
      * argv/envp marshalling from a caller process. */
     uint64_t stack=loaded.stack_top-4*sizeof(uint64_t);
     if(native_write_word(space,stack+0,0)<0 || native_write_word(space,stack+8,0)<0 ||
-       native_write_word(space,stack+16,0)<0 || native_write_word(space,stack+24,0)<0) return -1;
+       native_write_word(space,stack+16,0)<0 || native_write_word(space,stack+24,0)<0){
+        paging_destroy_user_space(space); kfree(space); return -1;
+    }
     uint64_t initial_brk=(loaded.load_end+ATM_PAGE_SIZE-1)&ATM_PAGE_MASK;
-    if(initial_brk>=ATM_USER_STACK_TOP) return -1;
+    if(initial_brk>=ATM_USER_STACK_TOP){paging_destroy_user_space(space);kfree(space);return -1;}
     /* task_create queues a READY task. Keep interrupts disabled from creation
      * through native metadata publication so the scheduler cannot enter CPL3
      * with address_space/user_entry/user_stack_top still zero. */
     uint64_t irq_flags=native_irq_save_disable();
     task_t *task=task_create(name&&name[0]?name:"native",native_app_task_entry,priority);
-    if(!task){native_irq_restore(irq_flags);return -1;}
+    if(!task){native_irq_restore(irq_flags);paging_destroy_user_space(space);kfree(space);return -1;}
     task->address_space=space;
     native_fd_task_init(task);
     task->user_entry=loaded.entry;
     task->user_stack_top=stack;
     task->user_brk_base=initial_brk;
     task->user_brk=initial_brk;
+    task->resident_bytes=(uint64_t)task->stack_size+paging_user_mapped_bytes(space);
     int pid=(int)task->pid;
     native_irq_restore(irq_flags);
     return pid;

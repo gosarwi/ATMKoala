@@ -26,6 +26,7 @@ int     kmemcmp(const void *a, const void *b, size_t n);
 /* Number formatting */
 void    kitoa(int n, char *buf, int base);
 void    kuitoa(uint32_t n, char *buf, int base);
+void    ku64toa(uint64_t n, char *buf, int base);
 int     ksnprintf(char *buf, size_t sz, const char *fmt, ...);
 
 /* Char classification (from POSIX ctype.h) */

@@ -53,13 +53,20 @@ int copy_string_from_user(const user_space_t *s,char *dst,size_t dst_size,const 
 int uaccess_selftest(void){
     user_space_t s;
     uint8_t *page=(uint8_t *)kmalloc_aligned(ATM_PAGE_SIZE,ATM_PAGE_SIZE);
-    if(!page||paging_create_user_space(&s)<0) return -1;
-    if(paging_map_user_page(&s,ATM_USER_BASE,(uintptr_t)page,ATM_PTE_W)<0) return -1;
+    int mapped=0,rc=-1;
+    if(!page) return -1;
+    if(paging_create_user_space(&s)<0){ kfree(page); return -1; }
+    if(paging_map_user_page(&s,ATM_USER_BASE,(uintptr_t)page,ATM_PTE_W)<0) goto done;
+    mapped=1;
     const char in[]="uaccess-ok"; char out[16];
-    if(copy_to_user(&s,(void *)(uintptr_t)ATM_USER_BASE,in,sizeof(in))<0) return -1;
-    if(copy_from_user(&s,out,(const void *)(uintptr_t)ATM_USER_BASE,sizeof(in))<0) return -1;
-    if(kstrcmp(out,in)) return -1;
+    if(copy_to_user(&s,(void *)(uintptr_t)ATM_USER_BASE,in,sizeof(in))<0) goto done;
+    if(copy_from_user(&s,out,(const void *)(uintptr_t)ATM_USER_BASE,sizeof(in))<0) goto done;
+    if(kstrcmp(out,in)) goto done;
     size_t n=0;
-    if(strnlen_user(&s,(const char *)(uintptr_t)ATM_USER_BASE,32,&n)<0||n!=10) return -1;
-    return copy_from_user(&s,out,(const void *)(uintptr_t)(ATM_USER_TOP-1),2)<0?0:-1;
+    if(strnlen_user(&s,(const char *)(uintptr_t)ATM_USER_BASE,32,&n)<0||n!=10) goto done;
+    rc=copy_from_user(&s,out,(const void *)(uintptr_t)(ATM_USER_TOP-1),2)<0?0:-1;
+done:
+    paging_destroy_user_space(&s);
+    if(!mapped) kfree(page);
+    return rc;
 }

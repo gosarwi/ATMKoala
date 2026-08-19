@@ -113,11 +113,23 @@ void *kmalloc_aligned(size_t size, size_t align) {
 }
 
 void kfree(void *ptr) {
-    if (!ptr) return;
-    block_header_t *hdr =
-        (block_header_t *)((uint8_t *)ptr - sizeof(block_header_t));
-    if (hdr->magic != HEAP_MAGIC) return; /* bad pointer / corruption */
-    if (hdr->free) return;                /* double-free guard */
+    if (!ptr || !heap_start) return;
+    uintptr_t start=(uintptr_t)heap_start;
+    uintptr_t end=start+(uintptr_t)heap_total+sizeof(block_header_t);
+    uintptr_t p=(uintptr_t)ptr;
+    if(p<start+sizeof(block_header_t) || p>=end) return;
+    block_header_t *hdr=(block_header_t *)(p-sizeof(block_header_t));
+    /* kmalloc_aligned stores the original kmalloc pointer in the machine word
+     * immediately before the aligned result. Recover it only after bounds
+     * checking the caller pointer, so arbitrary frees cannot dereference it. */
+    if(!heap_header_valid(hdr) || hdr->magic!=HEAP_MAGIC){
+        if(p<start+sizeof(void *)) return;
+        void *raw=((void **)ptr)[-1];
+        uintptr_t rp=(uintptr_t)raw;
+        if(rp<start+sizeof(block_header_t) || rp>=end) return;
+        hdr=(block_header_t *)(rp-sizeof(block_header_t));
+    }
+    if(!heap_header_valid(hdr) || hdr->magic!=HEAP_MAGIC || hdr->free) return;
     hdr->free = 1;
     coalesce();
 }

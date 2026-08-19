@@ -118,6 +118,14 @@ void kuitoa(uint32_t n, char *buf, int base) {
     while (n > 0) { tmp[i++] = digs[n%(uint32_t)base]; n /= (uint32_t)base; }
     int j = 0; while (i--) buf[j++] = tmp[i]; buf[j] = 0;
 }
+void ku64toa(uint64_t n, char *buf, int base) {
+    if (base < 2 || base > 16) { buf[0]='0'; buf[1]=0; return; }
+    if (n == 0) { buf[0]='0'; buf[1]=0; return; }
+    char tmp[65]; int i = 0;
+    const char *digs = "0123456789abcdef";
+    while (n > 0) { tmp[i++] = digs[n%(uint64_t)base]; n /= (uint64_t)base; }
+    int j = 0; while (i--) buf[j++] = tmp[i]; buf[j] = 0;
+}
 
 /* ── ksnprintf — safe formatted print to buffer ───────────── */
 int ksnprintf(char *buf, size_t sz, const char *fmt, ...) {

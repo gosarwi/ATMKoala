@@ -17,6 +17,7 @@
 
 #include "vga.h"
 #include "vbe.h"
+#include "mesa_foundation.h"
 #include "keyboard.h"
 #include "mouse.h"
 #include "util.h"
@@ -1470,6 +1471,7 @@ static void do_hwinfo(void) {
     cprintf("  RAM        : %u MB (%u KB)\n", g_mem_upper/1024, g_mem_upper);
     cprintf("  Heap Base  : 0x%x  Size: %uKB\n", 0x400000u, HEAP_SIZE/1024);
     cprintf("  Free Heap  : %u B\n", heap_free_bytes());
+    cprintf("  Process RAM: %u B resident across %u non-idle task(s)\n",(uint32_t)sched_total_resident_bytes(),sched_task_count());
     cprintf("  CR0        : 0x%x\n", cpu_cr0());
     con_writeln("===============================================================================================================");
     cprintf("  Disks      : %d ATA drive(s)\n", disk_count);
@@ -1480,7 +1482,12 @@ static void do_hwinfo(void) {
             disk_drives[i].model);
     }
     cprintf("  Network    : %s\n", net.initialized?"RTL8139 detected":"none");
-    cprintf("  Display    : %s\n", use_vbe?"VBE LFB 800x600x32bpp":"VGA text 80x25");
+    atm_gfx_capabilities_t gfx;
+    if(mesa_foundation_query(&gfx)==0){
+        cprintf("  Display    : %s\n",gfx.display_backend);
+        cprintf("  Renderer   : %s\n",gfx.renderer_backend);
+        cprintf("  Gfx ABI    : foundation v%u; acceleration=%s\n",gfx.abi_version,(gfx.capabilities&ATM_GFX_CAP_HW_ACCELERATION)?"yes":"no");
+    } else cprintf("  Display    : %s\n", use_vbe?"VBE framebuffer":"VGA text mode");
 }
 
 /* ====== /proc virtual files ================================================================================================================== */
@@ -2023,8 +2030,10 @@ void dispatch(char *line) {
     }
     else if (!kstrcmp(cmd,"mem")||!kstrcmp(cmd,"free")) {
         uint32_t tot=heap_free_bytes()+heap_used_bytes();
+        uint64_t resident=sched_total_resident_bytes();
         cprintf("%-16s%8s%8s%8s\nMem:     %8u%8u%8u\nSwap:    %8u%8u%8u\n",
             "","total","used","free",tot,heap_used_bytes(),heap_free_bytes(),0u,0u,0u);
+        cprintf("Process resident: %u B across %u non-idle task(s); CPU busy ticks: %u\n",(uint32_t)resident,sched_task_count(),(uint32_t)sched_busy_ticks());
     }
     else if (!kstrcmp(cmd,"dmesg")) {
         C_HDR(); con_writeln("[dmesg] atmkoala v0.5 boot log:"); C_NRM();
@@ -2401,6 +2410,16 @@ void dispatch(char *line) {
     else if (!kstrcmp(cmd,"logo"))   { if(use_vbe)vbe_draw_logo();else terminal_print_logo(); }
     else if (!kstrcmp(cmd,"atm-box") || !kstrcmp(cmd,"atmbox")) {
         atmbox_dispatch(argc, argv);
+    }
+    else if (!kstrcmp(cmd,"gfxinfo") || !kstrcmp(cmd,"mesa")) {
+        atm_gfx_capabilities_t gfx;
+        if(mesa_foundation_query(&gfx)<0){C_ERR();con_writeln("gfxinfo: capability query failed");C_NRM();goto done;}
+        C_HDR(); cprintf("ATMKoala graphics foundation ABI v%u\n",gfx.abi_version); C_NRM();
+        cprintf("  Display : %s\n",gfx.display_backend);
+        cprintf("  Renderer: %s\n",gfx.renderer_backend);
+        cprintf("  Surface : %ux%u %u bpp pitch=%u bytes=%u\n",gfx.width,gfx.height,gfx.bpp,gfx.pitch,(uint32_t)gfx.framebuffer_bytes);
+        cprintf("  Caps    : framebuffer=%s software=%s fixed-triangles=%s\n",(gfx.capabilities&ATM_GFX_CAP_FRAMEBUFFER)?"yes":"no",(gfx.capabilities&ATM_GFX_CAP_SOFTWARE_RENDERER)?"yes":"no",(gfx.capabilities&ATM_GFX_CAP_FIXED_TRIANGLES)?"yes":"no");
+        C_DIM(); con_writeln("  Hardware GPU acceleration, per-process GPU accounting and Mesa/Gallium/OpenGL/EGL/DRM ABI: not implemented."); C_NRM();
     }
     else if (!kstrcmp(cmd,"busybox")) {
         C_WRN(); con_writeln("BusyBox Linux binary ABI is not available in this kernel."); C_NRM();

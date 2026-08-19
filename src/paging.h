@@ -34,6 +34,10 @@ int paging_create_user_space(user_space_t *space);
 int paging_map_user_page(user_space_t *space, uint64_t user_va,
                          uintptr_t phys, uint64_t flags);
 int paging_unmap_user_page(user_space_t *space, uint64_t user_va);
+/* Count present pages in the dedicated user window. */
+uint64_t paging_user_mapped_bytes(const user_space_t *space);
+/* Free only resources owned by paging_create_user_space()/elf64_load_user(). */
+void paging_destroy_user_space(user_space_t *space);
 int paging_user_translate(const user_space_t *space, uint64_t user_va,
                           uintptr_t *phys_out, uint64_t *flags_out);
 int paging_user_range(const user_space_t *space, uint64_t user_va,

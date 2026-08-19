@@ -53,7 +53,7 @@ OBJS = build/boot.o        $(LIBC_SMOKE_BLOB) build/gdt.o        build/idt.o    
        build/partmgr.o     build/diskmgr.o    build/bsd_compat.o build/vga_modeset.o \
        build/icmp.o        build/dns.o                                            \
        build/tarzst.o        build/atmbox.o     build/fileformat.o build/image_decode.o build/image_fixtures.o build/awm.o       build/exp.o       build/ossdk.o   \
-       build/fat32.o        build/ext2.o       build/ext2_vfs.o   build/btrfs.o      build/hw_y116.o     build/tinygl_lite.o \
+       build/fat32.o        build/ext2.o       build/ext2_vfs.o   build/btrfs.o      build/hw_y116.o     build/tinygl_lite.o build/mesa_foundation.o \
        build/osbuilder.o   build/font.o       build/gamesdk.o                   \
        build/minesweeper.o build/snake_game.o build/gamelauncher.o build/store.o                                      \
        build/ttf.o        build/kmod.o        build/installer.o build/gui_demo.o \

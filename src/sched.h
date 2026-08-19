@@ -40,7 +40,13 @@ typedef struct task {
     cpu_context_t ctx;
     void         *stack_base;   /* allocated stack */
     uint32_t      stack_size;
-    uint32_t      ticks;        /* total ticks consumed */
+    uint64_t      ticks;        /* CPU PIT ticks consumed while RUNNING */
+    uint64_t      created_ticks;
+    uint64_t      state_changed_ticks;
+    uint64_t      resident_bytes; /* kernel stack + mapped native user pages */
+    uint64_t      io_read_bytes;  /* completed native FD reads */
+    uint64_t      io_write_bytes; /* completed native FD writes */
+    uint32_t      context_switches;
     uint32_t      priority;     /* 1=low, 5=normal, 10=high */
     int           exit_code;
     uint32_t      pending_signal; /* SIGTERM/SIGKILL foundation */
@@ -54,6 +60,15 @@ typedef struct task {
     uint32_t      fd_table_ready;
     struct task  *next;         /* run-queue list */
 } task_t;
+
+typedef struct {
+    uint32_t pid, ppid, uid, gid;
+    task_state_t state;
+    uint32_t priority, context_switches;
+    uint64_t cpu_ticks, created_ticks, state_changed_ticks;
+    uint64_t resident_bytes, io_read_bytes, io_write_bytes;
+    char name[32];
+} sched_task_info_t;
 
 /* Public API */
 void    sched_init(void);
@@ -75,6 +90,9 @@ void    sched_print_tasks(void);   /* ps command */
 uint32_t sched_uptime_ticks(void);
 uint32_t sched_idle_ticks(void);   /* ticks spent in the idle task */
 uint32_t sched_task_count(void);   /* live non-idle tasks */
+uint64_t sched_total_resident_bytes(void);
+uint64_t sched_busy_ticks(void);
+int      sched_task_info(uint32_t slot, sched_task_info_t *out);
 
 /* Context switch (implemented in boot.s) */
 extern void context_switch(cpu_context_t *old_ctx, cpu_context_t *new_ctx);

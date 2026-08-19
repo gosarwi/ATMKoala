@@ -55,13 +55,17 @@ int native_fd_close(task_t *task,int fd){
 }
 
 int64_t native_fd_read(task_t *task,int fd,void *buf,uint64_t count){
-    return native_socket_is_fd(task,fd)?native_socket_recv(task,fd,buf,count,300u):
-           (fd_valid(task,fd)?atm_posix_read(task->fd_map[fd],buf,count):-1);
+    int64_t n=native_socket_is_fd(task,fd)?native_socket_recv(task,fd,buf,count,300u):
+              (fd_valid(task,fd)?atm_posix_read(task->fd_map[fd],buf,count):-1);
+    if(n>0 && task) task->io_read_bytes+=(uint64_t)n;
+    return n;
 }
 
 int64_t native_fd_write(task_t *task,int fd,const void *buf,uint64_t count){
-    return native_socket_is_fd(task,fd)?native_socket_send(task,fd,buf,count):
-           (fd_valid(task,fd)?atm_posix_write(task->fd_map[fd],buf,count):-1);
+    int64_t n=native_socket_is_fd(task,fd)?native_socket_send(task,fd,buf,count):
+              (fd_valid(task,fd)?atm_posix_write(task->fd_map[fd],buf,count):-1);
+    if(n>0 && task) task->io_write_bytes+=(uint64_t)n;
+    return n;
 }
 
 int64_t native_fd_lseek(task_t *task,int fd,int64_t offset,int whence){
