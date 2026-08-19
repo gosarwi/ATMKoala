@@ -1,0 +1,20 @@
+# Generated build and disk artifacts
+/build/
+*.iso
+*.img
+disk.img
+*.elf
+*.o
+
+# Generated Limine host binary and downloaded release archive
+third_party/limine/bin/limine
+third_party/limine/limine-binary.tar.gz
+
+# Historical local release snapshots; current mainline source is published directly.
+/release_v0.5_atm_loader/
+/v09_stability_guiabi_increment/
+
+# Local editor and OS files
+.DS_Store
+*.swp
+*~

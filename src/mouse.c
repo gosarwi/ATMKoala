@@ -1,0 +1,129 @@
+#include "mouse.h"
+#include "idt.h"
+#include "util.h"
+#include <stdint.h>
+
+#define PS2_DATA       0x60
+#define PS2_STATUS     0x64
+#define PS2_COMMAND    0x64
+#define PS2_ST_OUTPUT  0x01
+#define PS2_ST_INPUT   0x02
+#define PS2_ST_AUX     0x20
+
+#define PS2_CMD_READ_CFG   0x20
+#define PS2_CMD_WRITE_CFG  0x60
+#define PS2_CMD_ENABLE_AUX 0xA8
+#define PS2_CMD_WRITE_AUX  0xD4
+
+#define MOUSE_CMD_DEFAULTS 0xF6
+#define MOUSE_CMD_ENABLE   0xF4
+#define MOUSE_ACK          0xFA
+
+static mouse_state_t g_mouse;
+static int g_screen_w=800, g_screen_h=600;
+static uint8_t g_packet[3];
+static int g_packet_pos;
+
+static int wait_input_clear(void) {
+    for (int i=0;i<100000;i++) {
+        if (!(inb(PS2_STATUS)&PS2_ST_INPUT)) return 1;
+        __asm__ volatile("pause");
+    }
+    return 0;
+}
+
+static int wait_output_byte(uint8_t *out) {
+    for (int i=0;i<100000;i++) {
+        if (inb(PS2_STATUS)&PS2_ST_OUTPUT) { *out=inb(PS2_DATA); return 1; }
+        __asm__ volatile("pause");
+    }
+    return 0;
+}
+
+static int wait_aux_byte(uint8_t *out) {
+    for (int i=0;i<100000;i++) {
+        uint8_t status=inb(PS2_STATUS);
+        if (status&PS2_ST_OUTPUT) {
+            uint8_t value=inb(PS2_DATA);
+            if (status&PS2_ST_AUX) { *out=value; return 1; }
+        }
+        __asm__ volatile("pause");
+    }
+    return 0;
+}
+
+static int controller_write(uint8_t value) {
+    if (!wait_input_clear()) return 0;
+    outb(PS2_COMMAND,value);
+    return 1;
+}
+
+static int mouse_write(uint8_t value) {
+    if (!controller_write(PS2_CMD_WRITE_AUX)) return 0;
+    if (!wait_input_clear()) return 0;
+    outb(PS2_DATA,value);
+    return 1;
+}
+
+static int mouse_command(uint8_t value) {
+    uint8_t reply=0;
+    return mouse_write(value) && wait_aux_byte(&reply) && reply==MOUSE_ACK;
+}
+
+static void mouse_irq(registers_t *r) {
+    (void)r;
+    uint8_t status=inb(PS2_STATUS);
+    if (!(status&PS2_ST_OUTPUT) || !(status&PS2_ST_AUX)) return;
+    uint8_t byte=inb(PS2_DATA);
+
+    /* Packet byte zero always has bit 3 set.  Re-synchronise after noise. */
+    if (g_packet_pos==0 && !(byte&0x08)) return;
+    g_packet[g_packet_pos++]=byte;
+    if (g_packet_pos<3) return;
+    g_packet_pos=0;
+
+    uint8_t flags=g_packet[0];
+    if (flags&0xC0) return; /* X/Y overflow: discard this packet */
+    int dx=(int)g_packet[1]; if (flags&0x10) dx-=256;
+    int dy=(int)g_packet[2]; if (flags&0x20) dy-=256;
+    int nx=g_mouse.x+dx;
+    int ny=g_mouse.y-dy; /* PS/2 Y grows upward; framebuffer Y downward */
+    if (nx<0) nx=0; else if (nx>=g_screen_w) nx=g_screen_w-1;
+    if (ny<0) ny=0; else if (ny>=g_screen_h) ny=g_screen_h-1;
+    g_mouse.x=nx; g_mouse.y=ny;
+    g_mouse.buttons=(uint8_t)(flags&0x07);
+}
+
+void mouse_init(int screen_w, int screen_h) {
+    kmemset(&g_mouse,0,sizeof(g_mouse));
+    g_packet_pos=0;
+    if (screen_w>0) g_screen_w=screen_w;
+    if (screen_h>0) g_screen_h=screen_h;
+    g_mouse.x=g_screen_w/2; g_mouse.y=g_screen_h/2;
+
+    /* No controller reply must block boot: absence simply disables the cursor. */
+    cpu_cli();
+    if (!controller_write(PS2_CMD_ENABLE_AUX)) { cpu_sti(); return; }
+
+    uint8_t cfg=0;
+    /* Command-byte replies originate from the controller, not the auxiliary
+     * device. Preserve its translation bit or keyboard scancodes change set. */
+    if (!controller_write(PS2_CMD_READ_CFG) || !wait_output_byte(&cfg)) { cpu_sti(); return; }
+    cfg|=0x02;       /* enable IRQ12 */
+    cfg&=(uint8_t)~0x20; /* enable auxiliary clock */
+    if (!controller_write(PS2_CMD_WRITE_CFG) || !wait_input_clear()) { cpu_sti(); return; }
+    outb(PS2_DATA,cfg);
+
+    if (!mouse_command(MOUSE_CMD_DEFAULTS) || !mouse_command(MOUSE_CMD_ENABLE)) {
+        cpu_sti(); return;
+    }
+
+    irq_install_handler(12,mouse_irq);
+    /* Unmask cascade IRQ2 and mouse IRQ12 on the legacy PIC. */
+    outb(0x21,(uint8_t)(inb(0x21)&(uint8_t)~0x04));
+    outb(0xA1,(uint8_t)(inb(0xA1)&(uint8_t)~0x10));
+    g_mouse.available=1;
+    cpu_sti();
+}
+
+const mouse_state_t *mouse_state(void) { return &g_mouse; }
