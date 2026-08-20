@@ -121,6 +121,8 @@ void net_irq_handler(void *regs);
 /* Utility */
 void net_print_info(void);
 void net_print_stats(void);
+/* Print detected PCI Ethernet controllers and their actual driver state. */
+void net_print_drivers(void);
 const char *net_mac_str(void);
 
 /* ARP request (send "who has ip?") */

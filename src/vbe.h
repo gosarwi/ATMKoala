@@ -72,6 +72,9 @@ int  vbe_double_buffer_enable(void);
 void vbe_double_buffer_disable(void);
 void vbe_present(void);
 void vbe_fill_rect(int x, int y, int w, int h, color32_t c);
+/* Blend a colour over the active VBE draw surface. Suitable for compact UI
+ * overlays; full background blur needs a retained compositor and is absent. */
+void vbe_blend_rect(int x, int y, int w, int h, color32_t c, uint8_t alpha);
 void vbe_draw_hline(int x, int y, int len, color32_t c);
 void vbe_draw_vline(int x, int y, int len, color32_t c);
 void vbe_draw_rect(int x, int y, int w, int h, color32_t c);

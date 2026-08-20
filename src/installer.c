@@ -9,6 +9,7 @@
 #include "catfs_vfs.h"
 #include "config.h"
 #include "users.h"
+#include "vfs.h"
 #include "util.h"
 #include <stdint.h>
 
@@ -39,6 +40,29 @@ static const char *const installer_timezones[]={
     "America/Chicago","America/Denver","America/Los_Angeles","Pacific/Auckland"
 };
 #define INSTALL_TZ_COUNT ((int)(sizeof(installer_timezones)/sizeof(installer_timezones[0])))
+#define INSTALL_LOG_CAP 2048u
+
+static char installer_log[INSTALL_LOG_CAP];
+static uint32_t installer_log_len;
+
+static void installer_log_reset(void){installer_log_len=0;installer_log[0]=0;}
+static void installer_log_add(const char *message){
+    if(!message||!message[0])return;
+    uint32_t n=(uint32_t)kstrlen(message);
+    if(n+2>=INSTALL_LOG_CAP)return;
+    if(installer_log_len+n+2>=INSTALL_LOG_CAP){
+        uint32_t keep=INSTALL_LOG_CAP/2u;
+        kmemmove(installer_log,installer_log+installer_log_len-keep,keep);
+        installer_log_len=keep;
+    }
+    kmemcpy(installer_log+installer_log_len,message,n);installer_log_len+=n;installer_log[installer_log_len++]='\n';installer_log[installer_log_len]=0;
+}
+static void installer_log_save(void){
+    if(!catfs_vfs_is_mounted()||!installer_log_len)return;
+    (void)vfs_mkdir("/data/uiu",0755);(void)vfs_mkdir("/data/uiu/var",0755);(void)vfs_mkdir("/data/uiu/var/log",0755);
+    int fd=vfs_open("/data/uiu/var/log/installer.log",O_WRONLY|O_CREAT|O_TRUNC,0644);
+    if(fd>=0){(void)vfs_write(fd,(const uint8_t*)installer_log,installer_log_len);vfs_close(fd);}
+}
 
 static void r(int x,int y,int w,int h,color32_t c){vbe_fill_rect(x,y,w,h,c);}
 static void box(int x,int y,int w,int h,color32_t c){vbe_draw_rect(x,y,w,h,c);}
@@ -92,30 +116,42 @@ static int install_target_partition(int drv,uint32_t start,uint32_t sectors,cons
      * MBR table, not a mixed layout, after the user types ERASE. */
     if(mbr_write(drv,&table,1)<0)return -1;
     if(catfs_format_at(drv,start,"atmkoala-root")<0)return -1;
+    installer_log_add("MBR written; formatting CatFS partition");
     if(catfs_path_mkdir("/home")<0||catfs_path_mkdir("/syls")<0||catfs_path_mkdir("/syls/bin")<0||
-       catfs_path_mkdir("/uiu")<0||catfs_path_mkdir("/uiu/etc")<0||catfs_path_mkdir("/data")<0||catfs_path_mkdir("/tmp")<0)return -1;
+       catfs_path_mkdir("/uiu")<0||catfs_path_mkdir("/uiu/etc")<0||catfs_path_mkdir("/uiu/var")<0||catfs_path_mkdir("/uiu/var/log")<0||catfs_path_mkdir("/data")<0||catfs_path_mkdir("/tmp")<0)return -1;
     if(catfs_sync()<0)return -1;
     if(catfs_vfs_mount("/data")<0)return -1;
+    installer_log_add("CatFS mounted at /data");
     /* The account implementation hashes and persists the selected root
      * password in /data/uiu/etc/users.conf. No clear-text password is stored. */
     if(!timezone||!timezone[0]||!root_password||user_set_password("root",root_password)<0)return -1;
     if(sysconf_set("system","timezone",timezone)<0)return -1;
     sysconf_save();
+    installer_log_add("Timezone and hashed root password saved");
+    installer_log_add("Installation completed successfully");
+    installer_log_save();
     return 0;
 }
 
-static void frame(int step,int target,uint32_t start,uint32_t sectors,int tz_idx,const char *root_password,int setup_field,int erase_count,const char *status,const char *preflight){
+static void frame(int step,int target,uint32_t start,uint32_t sectors,int tz_idx,const char *root_password,int setup_field,int erase_count,const char *status,const char *preflight,int show_log){
     int w=(int)vbe.width,h=(int)vbe.height; int px=(w-620)/2,py=(h-410)/2;
     r(0,0,w,h,BG); r(px,py,620,410,PANEL); box(px,py,620,410,LINE);
     r(px,py,620,48,ACCENT); text(px+22,py+15,"ATMKoala Disk Installer",PANEL,ACCENT);
     text(px+22,py+70,"Standalone installer boot mode",TEXT,PANEL);
     text(px+22,py+91,"Creates one aligned MBR CatFS partition; bootloader installation is not included.",SUB,PANEL);
     for(int i=0;i<5;i++){int shown=step>5?5:step;int c=i<shown?OK:(i==shown?ACCENT:LINE);r(px+24+i*112,py+122,96,4,c);}
+    if(show_log){
+        text(px+22,py+154,"Installer log (read-only)",TEXT,PANEL);
+        const char *p=installer_log;int ly=py+182;
+        while(*p&&ly<py+330){char line[92];int n=0;while(*p&&*p!='\n'&&n<(int)sizeof(line)-1)line[n++]=*p++;line[n]=0;if(*p=='\n')p++;text(px+22,ly,line,SUB,PANEL);ly+=18;}
+        text(px+22,py+334,"Press L or Esc to return to the installer.",SUB,PANEL);
+        button(px+470,py+355,126,"Close log",1);vbe_present();return;
+    }
     if(step==0){
         text(px+22,py+154,"Welcome",TEXT,PANEL);
         text(px+22,py+182,"The installer writes only after an explicit typed ERASE confirmation.",SUB,PANEL);
         text(px+22,py+206,"Existing MBR primary entries on the selected target will be replaced.",WARN,PANEL);
-        text(px+22,py+236,"Press Enter or click Continue to select an ATA target disk.",SUB,PANEL);
+        text(px+22,py+236,"Press Enter or click Continue to select an ATA target disk. L views logs.",SUB,PANEL);
     }else if(step==1){
         text(px+22,py+154,"Select target disk",TEXT,PANEL);
         if(target<0) text(px+22,py+190,"No ATA PIO disk was detected. Attach an IDE/ATA writable target, then reboot.",WARN,PANEL);
@@ -157,14 +193,16 @@ static void frame(int step,int target,uint32_t start,uint32_t sectors,int tz_idx
 }
 
 void installer_run(void){
-    int step=0,target=first_drive(),last_buttons=0,erase_count=0,tz_idx=0,setup_field=0;uint32_t start=0,sectors=0;const char *status="";char preflight[144],root_password[65];kmemset(root_password,0,sizeof(root_password));
+    int step=0,target=first_drive(),last_buttons=0,erase_count=0,tz_idx=0,setup_field=0,show_log=0;uint32_t start=0,sectors=0;const char *status="";char preflight[144],root_password[65];kmemset(root_password,0,sizeof(root_password));installer_log_reset();installer_log_add("Installer started");
     int buffered=(vbe_double_buffer_enable()==0);
     if(target>=0)layout_default(target,&start,&sectors);
     installer_preflight(target,preflight,sizeof(preflight));
     for(;;){
-        frame(step,target,start,sectors,tz_idx,root_password,setup_field,erase_count,status,preflight);
+        frame(step,target,start,sectors,tz_idx,root_password,setup_field,erase_count,status,preflight,show_log);
         int k=keyboard_poll();const mouse_state_t*m=mouse_state();int click=m&&m->available&&(m->buttons&1)&&!(last_buttons&1);if(m)last_buttons=m->buttons;
-        if(k==KEY_ESC){kmemset(root_password,0,sizeof(root_password));if(buffered)vbe_double_buffer_disable();return;}
+        if((k=='l'||k=='L')){show_log=!show_log;continue;}
+        if(k==KEY_ESC&&show_log){show_log=0;continue;}
+        if(k==KEY_ESC){installer_log_add("Installer cancelled");kmemset(root_password,0,sizeof(root_password));if(buffered)vbe_double_buffer_disable();return;}
         if(step==0&&(k=='\n'||k=='\r'||(click&&inside(m->x,m->y,(int)vbe.width/2+160,(int)vbe.height/2+150,126,30)))){step=1;continue;}
         if(step==1){
             if(k==KEY_LEFT||k==KEY_UP){target=next_drive(target,-1);layout_default(target,&start,&sectors);installer_preflight(target,preflight,sizeof(preflight));}
@@ -196,7 +234,7 @@ void installer_run(void){
             static const char confirm[]="ERASE";
             if(k==KEY_BACKSPACE&&erase_count>0)erase_count--;
             else if(k>0&&k<0x80&&erase_count<5){char ch=(char)k;if(ch>='a'&&ch<='z')ch-=32;if(ch==confirm[erase_count])erase_count++;else erase_count=(ch==confirm[0])?1:0;}
-            if((k=='\n'||k=='\r')&&erase_count==5){step=5;status="Writing MBR, CatFS, timezone and root account…";frame(step,target,start,sectors,tz_idx,root_password,setup_field,erase_count,status,preflight);step=install_target_partition(target,start,sectors,installer_timezones[tz_idx],root_password)==0?6:7;status=step==6?"Installation completed successfully.":"Installation failed after the destructive confirmation.";}
+            if((k=='\n'||k=='\r')&&erase_count==5){step=5;status="Writing MBR, CatFS, timezone and root account…";installer_log_add(status);frame(step,target,start,sectors,tz_idx,root_password,setup_field,erase_count,status,preflight,0);step=install_target_partition(target,start,sectors,installer_timezones[tz_idx],root_password)==0?6:7;status=step==6?"Installation completed successfully.":"Installation failed after the destructive confirmation.";if(step==7){installer_log_add(status);installer_log_save();}}
             continue;
         }
         if(step==6||step==7){if(k=='\n'||k=='\r'||(click&&inside(m->x,m->y,(int)vbe.width/2+160,(int)vbe.height/2+150,126,30))){kmemset(root_password,0,sizeof(root_password));if(buffered)vbe_double_buffer_disable();return;}}

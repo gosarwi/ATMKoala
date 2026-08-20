@@ -215,6 +215,15 @@ void vbe_fill_rect(int x, int y, int w, int h, color32_t c) {
     }
 }
 
+void vbe_blend_rect(int x,int y,int w,int h,color32_t c,uint8_t alpha){
+    if(!vbe.active||!alpha||w<=0||h<=0)return;if(alpha==255){vbe_fill_rect(x,y,w,h,c);return;}
+    if(x<0){w+=x;x=0;}if(y<0){h+=y;y=0;}if(x>=(int)vbe.width||y>=(int)vbe.height||w<=0||h<=0)return;
+    if(w>(int)vbe.width-x)w=(int)vbe.width-x;if(h>(int)vbe.height-y)h=(int)vbe.height-y;
+    uint32_t inv=255u-alpha,cr=(c>>16)&255u,cg=(c>>8)&255u,cb=c&255u;uint8_t *base=vbe_draw_base();
+    if(vbe.bpp==32){for(int row=0;row<h;row++){uint32_t *p=(uint32_t *)(base+(uint32_t)(y+row)*vbe.pitch)+(uint32_t)x;for(int col=0;col<w;col++){uint32_t old=p[col];p[col]=RGB((cr*alpha+((old>>16)&255u)*inv)/255u,(cg*alpha+((old>>8)&255u)*inv)/255u,(cb*alpha+(old&255u)*inv)/255u);}}}
+    else{for(int row=0;row<h;row++){uint8_t *p=base+(uint32_t)(y+row)*vbe.pitch+(uint32_t)x*3u;for(int col=0;col<w;col++,p+=3){p[0]=(uint8_t)((cb*alpha+(uint32_t)p[0]*inv)/255u);p[1]=(uint8_t)((cg*alpha+(uint32_t)p[1]*inv)/255u);p[2]=(uint8_t)((cr*alpha+(uint32_t)p[2]*inv)/255u);}}}
+}
+
 void vbe_blit_rgba_scaled(const uint8_t *rgba,int src_w,int src_h,int dst_x,int dst_y,int dst_w,int dst_h){
     if(!vbe.active||!rgba||src_w<=0||src_h<=0||dst_w<=0||dst_h<=0)return;
     int clip_l=dst_x<0?-dst_x:0,clip_t=dst_y<0?-dst_y:0;

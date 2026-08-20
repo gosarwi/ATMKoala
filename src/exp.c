@@ -173,6 +173,8 @@ static void draw_app_icon(app_id_t app,int x,int y,int size,color32_t fg,color32
         R(x+3*u,y+2*u,10*u,12*u,C_TEXT);BOX(x+3*u,y+2*u,10*u,12*u,fg);for(i=0;i<3;i++){BOX(x+5*u,y+(5+i*3)*u,2*u,2*u,fg);icon_line(x+8*u,y+(5+i*3)*u,3*u,u,fg);}
     } else if(app==APP_CLOCK){
         BOX(x+3*u,y+3*u,10*u,10*u,fg);R(x+7*u,y+7*u,2*u,2*u,fg);icon_line(x+8*u,y+5*u,u,3*u,fg);icon_line(x+8*u,y+8*u,3*u,u,fg);
+    } else if(app==APP_CALENDAR){
+        R(x+3*u,y+3*u,10*u,10*u,fg);R(x+4*u,y+6*u,8*u,6*u,C_BASE);HL(x+3*u,y+5*u,10*u,C_BASE);R(x+5*u,y+7*u,2*u,2*u,fg);R(x+9*u,y+7*u,2*u,2*u,fg);
     } else if(app==APP_TINYGL){
         BOX(x+3*u,y+3*u,8*u,8*u,fg);BOX(x+6*u,y+6*u,8*u,8*u,C_TEXT);VL(x+6*u,y+3*u,3*u,fg);HL(x+3*u,y+11*u,3*u,fg);
     } else if(app==APP_MINES){
@@ -199,31 +201,35 @@ static void tray_refresh_hardware(void){
 static void draw_tray_battery(int x,int y){
     color32_t c=!g_battery.valid?C_OVERLAY0:(!g_battery.present?C_SUBTEXT:(g_battery.capacity_pct<20?C_RED:(g_battery.charging?C_GREEN:C_TEXT)));
     BOX(x,y+3,14,10,c);R(x+14,y+6,2,4,c);
-    if(g_battery.valid&&g_battery.present){int fill=(int)(g_battery.capacity_pct*10u/100u);if(fill<1)fill=1;R(x+2,y+5,fill,6,c);}
+    if(g_battery.valid&&g_battery.present){int fill=(int)(g_battery.capacity_pct*10u/100u);if(fill<1)fill=1;R(x+2,y+5,fill,6,c);if(g_battery.charging){R(x+8,y+4,2,3,C_CRUST);R(x+6,y+7,2,3,C_CRUST);R(x+8,y+10,2,2,C_CRUST);}}
     else {HL(x+3,y+8,8,c);VL(x+7,y+5,6,c);}
 }
 static void draw_tray_wifi(int x,int y){
     color32_t c=g_radio.wifi_driver_ready?C_GREEN:(g_radio.wifi_controller_present?C_YELLOW:C_OVERLAY0);
-    HL(x+1,y+4,12,c);HL(x+3,y+7,8,c);HL(x+5,y+10,4,c);R(x+6,y+13,2,2,c);
-    if(!g_radio.wifi_driver_ready) VL(x+12,y+3,11,c);
+    /* Three nested radio bands plus a distinct centre node. */
+    R(x+1,y+3,12,1,c);R(x+2,y+4,10,1,c);R(x+3,y+6,8,1,c);R(x+4,y+7,6,1,c);R(x+5,y+9,4,1,c);R(x+6,y+11,2,2,c);
+    if(!g_radio.wifi_driver_ready){R(x+11,y+10,3,2,c);R(x+12,y+8,2,2,c);}
 }
 static void draw_tray_bluetooth(int x,int y){
     color32_t c=g_radio.bluetooth_driver_ready?C_GREEN:(g_radio.bluetooth_controller_present?C_YELLOW:C_OVERLAY0);
-    VL(x+7,y+2,12,c);HL(x+7,y+2,3,c);HL(x+7,y+14,3,c);VL(x+10,y+4,3,c);VL(x+10,y+10,3,c);HL(x+4,y+5,3,c);HL(x+4,y+11,3,c);
-    if(!g_radio.bluetooth_driver_ready) R(x+1,y+1,2,2,c);
+    /* Compact recognisable Bluetooth rune, with status dot only when no HCI driver exists. */
+    VL(x+7,y+2,12,c);R(x+8,y+3,2,2,c);R(x+10,y+5,2,2,c);R(x+8,y+7,2,2,c);R(x+8,y+9,2,2,c);R(x+10,y+11,2,2,c);R(x+8,y+13,2,2,c);
+    if(!g_radio.bluetooth_driver_ready)R(x+1,y+12,3,3,c);
 }
 
 /* ─── Taskbar ────────────────────────────────────────────── */
 static void draw_taskbar(void){
     int ty=DE_SCR_H-DE_TASKBAR_H;
-    R(0,ty,DE_SCR_W,DE_TASKBAR_H,C_CRUST);
+    /* Small alpha overlay keeps desktop wallpaper visible under the dock. */
+    vbe_blend_rect(0,ty,DE_SCR_W,DE_TASKBAR_H,C_CRUST,224);
     HL(0,ty,DE_SCR_W,C_SURFACE2);
     /* Bottom dock: quiet, flat and compact. */
     tray_refresh_hardware();
     color32_t lb=DE.launcher_open?C_SURFACE2:C_SURFACE1;
     RR(6,ty+4,70,DE_TASKBAR_H-8,lb);
-    draw_app_icon(APP_ABOUT,11,ty+6,16,DE.launcher_open?C_TEXT:C_SUBTEXT,lb);
-    T(31,ty+6,"Menu",DE.launcher_open?C_TEXT:C_SUBTEXT,lb);
+    /* Four-cell menu glyph is crisp at VBE scale and distinct from app icons. */
+    color32_t mc=DE.launcher_open?C_TEXT:C_SUBTEXT;R(12,ty+8,5,5,mc);R(19,ty+8,5,5,mc);R(12,ty+15,5,5,mc);R(19,ty+15,5,5,mc);
+    T(31,ty+6,"Menu",mc,lb);
     int tray_left=DE_SCR_W-182;
     int wx=84;
     for(int i=0;i<DE.win_count;i++){
@@ -264,7 +270,7 @@ static const DI ICONS[12]={
     {440, 24, APP_TASKS,     "Tasks",    RGB(0x43,0x72,0x69)},
     {510, 24, APP_ABOUT,     "About",    RGB(0x77,0x77,0x70)},
     {20, 104, APP_JOURNAL,   "Journal",  RGB(0x70,0x70,0x68)},
-    {90, 104, APP_CLOCK,     "Clock",    RGB(0x38,0x38,0x34)},
+    {90, 104, APP_CALENDAR,  "Calendar", RGB(0x38,0x38,0x34)},
     {160,104, APP_TINYGL,    "TinyGL",   RGB(0x46,0x70,0x82)},
     {230,104, APP_VIEWER,"Viewer", RGB(0x60,0x75,0x8B)},
 };
@@ -357,7 +363,9 @@ static void draw_chrome(exp_win_t *w, int focused){
     R(w->x+2,w->y+2,w->w,w->h,focused?C_CRUST:C_MANTLE);
     R(w->x,w->y,w->w,w->h,C_BASE);
     BOX(w->x,w->y,w->w,w->h,bd);
-    R(w->x+1,w->y+1,w->w-2,DE_TITLEBAR_H-1,tb);
+    /* Title overlay is translucent over the already-rendered chrome; full
+     * blur is intentionally absent because Exp has no retained compositor. */
+    vbe_blend_rect(w->x+1,w->y+1,w->w-2,DE_TITLEBAR_H-1,tb,224);
     HL(w->x+1,w->y+1,w->w-2,focused?C_SURFACE2:C_SURFACE1);
     HL(w->x+1,w->y+DE_TITLEBAR_H,w->w-2,focused?C_PEACH:C_SURFACE2);
     draw_app_icon(w->app,w->x+14,w->y+3,16,tf,tb);
@@ -993,6 +1001,24 @@ static void snake_tick(exp_win_t*w){exp_snake_t*s=&w->snake;uint32_t now=pit_get
 static void draw_snake_app(exp_win_t*w){exp_snake_t*s=&w->snake;int cx=CX(w),cy=CY(w),cell=16,bx=cx+14,by=cy+44;R(cx,cy,CW(w),CH(w),C_BASE);T(cx+14,cy+10,"SNAKE",C_GREEN,C_BASE);char score[64];ksnprintf(score,sizeof(score),"Score %d  | arrows steer  | R restart",s->score);T(cx+14,cy+26,score,C_SUBTEXT,C_BASE);R(bx-2,by-2,20*cell+4,14*cell+4,C_CRUST);BOX(bx-2,by-2,20*cell+4,14*cell+4,C_SURFACE2);R(bx+s->food.x*cell+3,by+s->food.y*cell+3,cell-6,cell-6,C_PEACH);for(int i=s->length-1;i>=0;i--){color32_t c=i?C_GREEN:C_TEXT;R(bx+s->body[i].x*cell+2,by+s->body[i].y*cell+2,cell-4,cell-4,c);}if(s->state)T(bx+86,by+104,"GAME OVER",C_YELLOW,C_CRUST);int cb=by+14*cell+12;static const char*ctl[]={"Left","Up","Down","Right"};for(int i=0;i<4;i++){int bw=i==3?74:54,bx2=cx+14+(i==0?0:(i==1?58:(i==2?116:174)));R(bx2,cb,bw,24,C_MANTLE);BOX(bx2,cb,bw,24,C_SURFACE2);T(bx2+6,cb+5,ctl[i],C_SUBTEXT,C_MANTLE);}}
 static void snake_key(exp_win_t*w,int k){exp_snake_t*s=&w->snake;if(k=='r'||k=='R'){snake_init(w);return;}if(k==KEY_LEFT&&s->dx!=1){s->dx=-1;s->dy=0;}else if(k==KEY_RIGHT&&s->dx!=-1){s->dx=1;s->dy=0;}else if(k==KEY_UP&&s->dy!=1){s->dx=0;s->dy=-1;}else if(k==KEY_DOWN&&s->dy!=-1){s->dx=0;s->dy=1;}}
 
+static int calendar_leap(int y){return (y%4==0&&y%100!=0)||y%400==0;}
+static int calendar_days(int y,int m){static const uint8_t d[]={31,28,31,30,31,30,31,31,30,31,30,31};return m==2?d[1]+calendar_leap(y):d[m-1];}
+static int calendar_weekday(int y,int m,int d){static const uint8_t t[]={0,3,2,5,0,3,5,1,4,6,2,4};if(m<3)y--;return (y+y/4-y/100+y/400+t[m-1]+d)%7;}
+static void draw_calendar_app(exp_win_t *w){
+    static const char *const mon[]={"January","February","March","April","May","June","July","August","September","October","November","December"};
+    static const char *const dow[]={"Su","Mo","Tu","We","Th","Fr","Sa"};
+    int cx=CX(w),cy=CY(w),cw2=CW(w),ch=CH(w);R(cx,cy,cw2,ch,C_BASE);
+    if(w->cal_year<1)w->cal_year=2026;if(w->cal_month<1||w->cal_month>12)w->cal_month=1;
+    char title[64];ksnprintf(title,sizeof(title),"%s %d",mon[w->cal_month-1],w->cal_year);T(cx+14,cy+12,title,C_LAVENDER,C_BASE);
+    T(cx+14,cy+28,"Manual calendar | Left/Right month | Up/Down year",C_SUBTEXT,C_BASE);
+    int gx=cx+14,gy=cy+54,gw=cw2-28,cellw=gw/7,cellh=25;
+    for(int i=0;i<7;i++)T(gx+i*cellw+6,gy,dow[i],i==0||i==6?C_PEACH:C_SUBTEXT,C_BASE);
+    int first=calendar_weekday(w->cal_year,w->cal_month,1),days=calendar_days(w->cal_year,w->cal_month);
+    for(int d=1;d<=days;d++){int slot=first+d-1,row=slot/7,col=slot%7,px=gx+col*cellw,py=gy+18+row*cellh; color32_t bg=(col==0||col==6)?C_MANTLE:C_SURFACE0;R(px,py,cellw-2,cellh-2,bg);char n[4];kitoa(d,n,10);T(px+7,py+4,n,col==0||col==6?C_PEACH:C_TEXT,bg);}
+    T(cx+14,gy+18+6*cellh+8,"System date is not claimed: set timezone now; RTC/NTP will provide real dates later.",C_OVERLAY0,C_BASE);
+}
+static void calendar_key(exp_win_t *w,int k){if(k==KEY_LEFT){if(--w->cal_month<1){w->cal_month=12;w->cal_year--;}}else if(k==KEY_RIGHT){if(++w->cal_month>12){w->cal_month=1;w->cal_year++;}}else if(k==KEY_UP)w->cal_year++;else if(k==KEY_DOWN&&w->cal_year>1)w->cal_year--;}
+
 static void draw_clock_app(exp_win_t *w){
     int cx=CX(w),cy=CY(w),cw2=CW(w),ch=CH(w);
     R(cx,cy,cw2,ch,C_BASE);
@@ -1285,7 +1311,7 @@ static void draw_about(exp_win_t *w){
 
 /* ─── Launcher ───────────────────────────────────────────── */
 static const struct{const char *name,*desc;app_id_t app;color32_t ic;}
-LA[15]={
+LA[16]={
     {"Terminal","Command workspace",APP_TERMINAL,RGB(0x48,0x6E,0x85)},
     {"Files",   "Local file browser",APP_FILES,RGB(0x8F,0x7A,0x3A)},
     {"Notepad", "Plain text editor",APP_NOTEPAD,RGB(0x44,0x76,0x4B)},
@@ -1295,6 +1321,7 @@ LA[15]={
     {"Tasks",   "Local checklist",APP_TASKS,RGB(0x43,0x72,0x69)},
     {"Journal", "Persistent daily notes",APP_JOURNAL,RGB(0x70,0x70,0x68)},
     {"Clock",   "Uptime and time",APP_CLOCK,RGB(0x38,0x38,0x34)},
+    {"Calendar","Manual month view",APP_CALENDAR,RGB(0x38,0x38,0x34)},
     {"About",   "System overview",APP_ABOUT,RGB(0x77,0x77,0x70)},
     {"TinyGL",  "Software 3D demo",APP_TINYGL,RGB(0x46,0x70,0x82)},
     {"Mines",   "GUI minesweeper",APP_MINES,RGB(0x52,0x52,0x4B)},
@@ -1302,7 +1329,7 @@ LA[15]={
     {"Viewer",  "Text and image viewer",APP_VIEWER,RGB(0x60,0x75,0x8B)},
     {"ArchiveEx", "Validated TAR.ZST/ATPK installer",APP_ARCHIVEEX,RGB(0x7B,0x66,0x28)},
 };
-#define NLA 15
+#define NLA 16
 #define LA_COLS 2
 #define LA_ROWS ((NLA+LA_COLS-1)/LA_COLS)
 
@@ -1422,6 +1449,9 @@ int exp_open_app(app_id_t app, const char *path){
     case APP_CLOCK:
         kstrcpy(w->title,"Clock");
         w->w=340; w->h=240; break;
+    case APP_CALENDAR:
+        kstrcpy(w->title,"Calendar (manual)");
+        w->cal_year=2026;w->cal_month=1;w->w=390;w->h=300;break;
     case APP_TINYGL:
         kstrcpy(w->title,"TinyGL Gears (software)");
         w->w=520; w->h=400; break;
@@ -1552,6 +1582,7 @@ static void draw_win_content(exp_win_t *w){
     case APP_TASKS:    draw_tasks(w);    break;
     case APP_JOURNAL:  draw_editor(w);   break;
     case APP_CLOCK:    draw_clock_app(w);break;
+    case APP_CALENDAR: draw_calendar_app(w);break;
     case APP_TINYGL:   draw_tinygl_app(w);break;
     case APP_MINES:    draw_mines_app(w);break;
     case APP_SNAKE:    draw_snake_app(w);break;
@@ -1747,6 +1778,7 @@ void exp_run(void){
             case APP_SETTINGS: settings_key(w,k); break;
             case APP_CALCULATOR: calc_key(w,k); break;
             case APP_TASKS:    tasks_key(w,k); break;
+            case APP_CALENDAR: calendar_key(w,k); break;
             case APP_MINES:    mines_key(w,k); break;
             case APP_SNAKE:    snake_key(w,k); break;
             case APP_IMAGE_VIEWER: image_viewer_key(w,k); break;

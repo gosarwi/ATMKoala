@@ -59,7 +59,7 @@ extern exp_palette_t exp_palette;
 typedef enum {
     APP_NONE=0, APP_TERMINAL, APP_FILES, APP_EDITOR, APP_NOTEPAD,
     APP_SYSMON, APP_SETTINGS, APP_VIEWER, APP_ABOUT, APP_CALCULATOR,
-    APP_TASKS, APP_JOURNAL, APP_CLOCK, APP_TINYGL, APP_MINES, APP_SNAKE,
+    APP_TASKS, APP_JOURNAL, APP_CLOCK, APP_CALENDAR, APP_TINYGL, APP_MINES, APP_SNAKE,
     APP_IMAGE_VIEWER, /* legacy internal compatibility ID */
     APP_ARCHIVEEX,
     APP_EXTERNAL=0x70,
@@ -203,6 +203,9 @@ typedef struct {
     /* Tasks */
     uint8_t    todo_done[5];
     int        todo_sel;
+
+    /* Calendar is manual because ATMKoala has no RTC/NTP wall-clock yet. */
+    int        cal_year, cal_month;
 
     /* Native GUI games */
     exp_mines_t mines;

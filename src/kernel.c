@@ -342,7 +342,7 @@ static void readline_v6(char *out, int maxlen) {
 
     /* Tab completion candidates */
     static const char *builtins[] = {
-        "ls","ll","la","cat","view","less","head","tail","file","hd","hexdump","wc",
+        "ls","ll","la","cat","view","less","installer-log","head","tail","file","hd","hexdump","wc",
         "grep","sort","uniq","cut","tr","tee","find","tree","write","append","touch","dd",
         "rm","cp","mv","mkdir","rmdir","cd","pwd","stat","chmod","chown","ln",
         "ps","kill","sleep","wait","sh","source","uname","info","hwinfo","lscpu","cpucompat",
@@ -1743,6 +1743,7 @@ void dispatch(char *line) {
     else if (!kstrcmp(cmd,"la")){ char *na[]={"ls","-a",argv[1],NULL};do_ls(3,na); }
     else if (!kstrcmp(cmd,"cat"))  { if(argc<2){C_ERR();con_writeln("cat: missing arg");C_NRM();}else for(int i=1;i<argc;i++) do_cat(argv[i]); }
     else if (!kstrcmp(cmd,"view")||!kstrcmp(cmd,"less")) { if(argc<2){C_ERR();con_writeln("view: missing arg");C_NRM();}else do_view(argv[1]); }
+    else if (!kstrcmp(cmd,"installer-log")) { do_view("/data/uiu/var/log/installer.log"); }
     else if (!kstrcmp(cmd,"stat")) { if(argc<2){C_ERR();con_writeln("stat: missing arg");C_NRM();}else do_stat(argv[1]); }
     else if (!kstrcmp(cmd,"file")) {
         if(argc<2) goto done;
@@ -2226,7 +2227,8 @@ void dispatch(char *line) {
         if(argc>=2 && !kstrcmp(argv[1],"test")) {
             int arp_rc=net_arp_selftest(),tcp_rc=atm_tcp_selftest();
             cprintf("net test: arp-cache=%s tcp-checksum-window=%s\n",arp_rc==0?"OK":"FAIL",tcp_rc==0?"OK":"FAIL");
-        } else con_writeln("net: test");
+        } else if(argc>=2 && !kstrcmp(argv[1],"drivers")) net_print_drivers();
+        else con_writeln("net: test | drivers");
     }
 
     else if (!kstrcmp(cmd,"ping")) {
@@ -2738,12 +2740,12 @@ void dispatch(char *line) {
         C_HDR(); con_writeln("atmkoala v0.5 === Command Reference"); C_NRM();
         con_writeln("  Run 'info' for system details, 'man <cmd>' for command help\n");
         const char *grps[][2] = {
-            {"Files",   "ls ll la cat view less head tail file hd hexdump wc grep sort uniq cut tr tee dd"},
+            {"Files",   "ls ll la cat view less installer-log head tail file hd hexdump wc grep sort uniq cut tr tee dd"},
             {"Edit",    "write append touch rm cp mv mkdir rmdir tree find stat chmod chown ln"},
             {"Apps",    "de  gui open <id>  notepad  files  editor  monitor  settings  gears  glxgears  wallpaper [path]"},
             {"Disk",    "lsblk df du mount [hda1] umount mkfs fsck [-y] hda1 sync live"},
             {"System",  "uname info hwinfo lscpu cpucompat uptime mem free ps kill mouse dmesg date timezone which man modules"},
-            {"Network", "ifconfig netstat ping arp route unm connect|disconnect|status|profiles|save untui"},
+            {"Network", "ifconfig netstat net test|drivers ping arp route unm connect|disconnect|status|profiles|save untui"},
             {"Users",   "users adduser deluser usermod passwd login logout sudo su whoami id"},
             {"Services","openrc rc-status rc 1|3|5 rc-service rc-update"},
             {"Packages","pkg install|info|list|remove|create readelf exec"},

@@ -12,6 +12,7 @@
 #include "vga.h"
 #include "idt.h"
 #include "pit.h"
+#include "hw_y116.h"
 #include <stdint.h>
 #include <stddef.h>
 
@@ -43,20 +44,15 @@ static void pci_write(uint8_t bus, uint8_t dev, uint8_t fn, uint8_t reg, uint32_
 #define RTL_VENDOR  0x10EC
 #define RTL_DEVID   0x8139
 
-/* Scan PCI bus 0 for RTL8139, return I/O base or 0 */
+/* Use boot-time PCI inventory rather than assuming bus 0/function 0. This
+ * discovers RTL8139 behind bridges and on multifunction devices too. */
 static uint16_t pci_find_rtl8139(void) {
-    for (uint8_t dev = 0; dev < 32; dev++) {
-        uint32_t id = pci_read(0, dev, 0, 0x00);
-        if ((id & 0xFFFF) == RTL_VENDOR &&
-            ((id >> 16) & 0xFFFF) == RTL_DEVID) {
-            /* Enable bus master + I/O space */
-            uint32_t cmd = pci_read(0, dev, 0, 0x04);
-            cmd |= 0x05;
-            pci_write(0, dev, 0, 0x04, cmd);
-            /* BAR0 = I/O base */
-            uint32_t bar0 = pci_read(0, dev, 0, 0x10);
-            return (uint16_t)(bar0 & ~0x3);
-        }
+    for(int i=0;i<g_pci.count;i++){
+        const pci_device_t *p=&g_pci.devs[i];
+        if(p->vendor!=RTL_VENDOR||p->device!=RTL_DEVID)continue;
+        uint32_t cmd=pci_read(p->bus,p->dev,p->fn,0x04);cmd|=0x05;pci_write(p->bus,p->dev,p->fn,0x04,cmd);
+        uint32_t bar0=pci_read(p->bus,p->dev,p->fn,0x10);
+        if((bar0&1u)&&(bar0&~0x3u))return (uint16_t)(bar0&~0x3u);
     }
     return 0;
 }
@@ -298,11 +294,30 @@ const char *net_mac_str(void) {
     return mac_buf;
 }
 
+void net_print_drivers(void){
+    int found=0; char line[112];
+    terminal_writeln("=== PCI Ethernet drivers ===");
+    terminal_writeln("  rtl8139: operational driver (10EC:8139, PCI inventory scan)");
+    for(int i=0;i<g_pci.count;i++){
+        const pci_device_t *p=&g_pci.devs[i];
+        if(p->class_code!=0x02)continue; found=1;
+        const char *state="detected; no driver";
+        if(p->vendor==RTL_VENDOR&&p->device==RTL_DEVID)state=net.initialized?"RTL8139 active as eth0":"RTL8139 detected; init failed";
+        else if(p->vendor==0x10EC&&(p->device==0x8168||p->device==0x8161||p->device==0x8125))state="Realtek RTL8168/8125 detected; driver unavailable";
+        else if(p->vendor==0x8086)state="Intel Ethernet detected; e1000/e1000e driver unavailable";
+        else if(p->vendor==0x1AF4)state="virtio-net controller detected; driver unavailable";
+        ksnprintf(line,sizeof(line),"  %02x:%02x.%u %04x:%04x  %s",p->bus,p->dev,p->fn,p->vendor,p->device,state);terminal_writeln(line);
+    }
+    if(!found)terminal_writeln("  No PCI Ethernet controller found.");
+    terminal_writeln("  Wi-Fi and Bluetooth require separate MAC/HCI drivers; controller discovery alone is not connectivity.");
+}
+
 void net_print_info(void) {
     char buf[16];
     if (!net.initialized) {
-        terminal_writeln("  eth0: No RTL8139 detected");
-        terminal_writeln("  (Use QEMU: -netdev user,id=n0 -device rtl8139,netdev=n0)");
+        terminal_writeln("  eth0: No supported RTL8139 initialized");
+        terminal_writeln("  Run 'net drivers' for PCI controller state.");
+        terminal_writeln("  QEMU example: -netdev user,id=n0 -device rtl8139,netdev=n0");
         return;
     }
     terminal_write("  eth0:  MAC="); terminal_writeln(net_mac_str());
