@@ -273,10 +273,10 @@ int catfs_mount_at(int drive, uint32_t lba_offset) {
 }
 
 /* ── fsck ────────────────────────────────────────────────── */
-int catfs_fsck(int drive, int repair) {
+int catfs_fsck_at(int drive, uint32_t lba_offset, int repair) {
     catfs_state_t saved = catfs;
     int problems = 0;
-    if (catfs_mount(drive) < 0) return -1;
+    if (catfs_mount_at(drive,lba_offset) < 0) { catfs=saved; return -1; }
 
     uint8_t *seen = (uint8_t *)kmalloc(CATFS_BLOCKS_MAX / 8);
     if (seen) {
@@ -289,7 +289,10 @@ int catfs_fsck(int drive, int repair) {
             if (in->indirect)  seen[in->indirect/8]  |= (uint8_t)(1u << (in->indirect%8));
             if (in->dindirect) seen[in->dindirect/8] |= (uint8_t)(1u << (in->dindirect%8));
         }
-        for (uint32_t b = 0; b < CATFS_BLOCKS_MAX; b++) {
+        /* Block zero is permanently reserved as the on-disk null-block
+         * sentinel. It is intentionally marked but never referenced by an
+         * inode, so begin consistency checks at the first allocatable block. */
+        for (uint32_t b = 1; b < CATFS_BLOCKS_MAX; b++) {
             int marked = (catfs.bitmap[b/8] >> (b%8)) & 1;
             int actual = (seen[b/8] >> (b%8)) & 1;
             if (marked && !actual) { problems++; if (repair) bm_clr(b); }
@@ -316,9 +319,15 @@ int catfs_fsck(int drive, int repair) {
         journal_flush_header();
     }
 
-    if (repair && problems) catfs_sync();
-    if (!repair) catfs = saved;
+    if (repair && problems && catfs_sync()<0) problems++;
+    /* fsck is an inspection/repair operation, not a mount operation. Preserve
+     * the active CatFS context even when checking another MBR partition. */
+    catfs = saved;
     return problems;
+}
+
+int catfs_fsck(int drive, int repair) {
+    return catfs_fsck_at(drive,0,repair);
 }
 
 /* ── Path helpers ────────────────────────────────────────── */

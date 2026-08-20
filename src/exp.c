@@ -970,11 +970,11 @@ static void tasks_key(exp_win_t *w,int k){
 }
 static void draw_tinygl_app(exp_win_t *w){
     int cx=CX(w),cy=CY(w),cw2=CW(w),ch=CH(w);
-    T(cx+10,cy+8,"TinyGL-Lite",C_LAVENDER,C_BASE);
-    T(cx+10,cy+24,"fixed-point software 3D  |  VBE back buffer",C_SUBTEXT,C_BASE);
+    T(cx+10,cy+8,"TinyGL-Lite Gears",C_LAVENDER,C_BASE);
+    T(cx+10,cy+24,"fixed-point software raster demo | no GLX / Mesa API",C_SUBTEXT,C_BASE);
     int vh=ch-52;if(vh<64)vh=64;
-    tgl_draw_cube(&tinygl_ctx,cx+10,cy+42,cw2-20,vh,(int)(pit_get_ticks()*7));
-    T(cx+12,cy+46,"rotating cube",C_TEXT,RGB(0x10,0x10,0x10));
+    tgl_draw_gears(&tinygl_ctx,cx+10,cy+42,cw2-20,vh,(int)(pit_get_ticks()*7));
+    T(cx+12,cy+46,"software gears scene",C_TEXT,RGB(0x10,0x10,0x10));
 }
 /* ─── Native GUI games ───────────────────────────────────── */
 static uint32_t gui_rng_state=0x6D2B79F5u;
@@ -1423,7 +1423,7 @@ int exp_open_app(app_id_t app, const char *path){
         kstrcpy(w->title,"Clock");
         w->w=340; w->h=240; break;
     case APP_TINYGL:
-        kstrcpy(w->title,"TinyGL Demo");
+        kstrcpy(w->title,"TinyGL Gears (software)");
         w->w=520; w->h=400; break;
     case APP_MINES:
         kstrcpy(w->title,"Minesweeper");

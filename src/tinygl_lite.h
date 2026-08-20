@@ -27,6 +27,8 @@ void tgl_reset(tgl_context_t *ctx);
 void tgl_begin(tgl_context_t *ctx, int x, int y, int width, int height, uint32_t clear_color);
 void tgl_triangle(tgl_context_t *ctx, const tgl_vertex_t *a, const tgl_vertex_t *b, const tgl_vertex_t *c);
 void tgl_draw_cube(tgl_context_t *ctx, int x, int y, int width, int height, int angle);
+/* Software gears benchmark-style scene; no GLX, OpenGL ABI or Mesa API. */
+void tgl_draw_gears(tgl_context_t *ctx, int x, int y, int width, int height, int angle);
 const char *tgl_renderer_name(void);
 
 #endif

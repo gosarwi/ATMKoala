@@ -140,7 +140,8 @@ int catfs_format_at(int drive, uint32_t lba_offset, const char *label);
 int catfs_mount(int drive);
 int catfs_mount_at(int drive, uint32_t lba_offset);
 int catfs_sync(void);
-int catfs_fsck(int drive, int repair);   /* new: consistency check */
+int catfs_fsck(int drive, int repair);   /* legacy whole-drive consistency check */
+int catfs_fsck_at(int drive, uint32_t lba_offset, int repair); /* partition-aware, restores active mount */
 
 int catfs_lookup(const char *path);
 int catfs_create(const char *path, uint8_t type);

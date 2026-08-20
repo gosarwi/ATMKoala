@@ -21,11 +21,11 @@ The ISO contains a Limine BIOS and UEFI boot path. GRUB is not part of the activ
 | User mode | Static ELF64 ET_EXEC applications at CPL 3 through `int $0x80` |
 | Native libc | Static freestanding subset with musl-derived string, ctype and stdlib components |
 | Desktop | Exp framebuffer desktop, terminal, Notepad, Files, Viewer and ArchiveEx |
-| Storage | ATA PIO disk discovery; MBR primary-partition inspection; CatFS and FAT32; ext2 read-only VFS adapter with guarded existing-block write support |
+| Storage | ATA PIO disk discovery; MBR primary-partition inspection; CatFS mount/fsck for primary partitions; CatFS and FAT32; ext2 read-only VFS adapter with guarded existing-block write support |
 | Networking | RTL8139, ARP, IPv4, TCP client/listener primitives and native socket ABI |
 | Native userspace | `atm-box` Toybox-compatible applets for files, process listing, memory, I/O, GPU and uptime reporting |
 | Process accounting | Per-task CPU ticks, resident mapped bytes, native FD read/write bytes and context switches |
-| Graphics foundation | Truthful framebuffer/TinyGL-Lite capability query; this is not a Mesa, OpenGL, EGL, Gallium, DRM or DRI port |
+| Graphics foundation | Truthful framebuffer/TinyGL-Lite capability query and a fixed-point software gears demo; this is not a Mesa, OpenGL, GLX, EGL, Gallium, DRM or DRI port |
 | USB | PCI USB-host controller discovery only; USB device enumeration and BOT/SCSI mass-storage are not implemented |
 | TLS/HTTPS | Not implemented; curl remains audit-only |
 
@@ -73,7 +73,11 @@ The static libc smoke application covers CRT startup, allocation, musl-derived s
 
 `lsblk` reports detected ATA PIO disks, validates primary MBR entries, and labels CatFS and ext2 signatures without mounting or writing them. `lsblk --rescan` is available only while CatFS is unmounted. The `usb` command reports PCI USB host controllers, but does **not** expose USB sticks as disks: the required USB enumeration, bulk-only transport, and SCSI block layer remain unimplemented.
 
-The dedicated graphical installer is intentionally destructive. It selects one ATA PIO target, displays a cached MBR/filesystem preflight, lets the user choose a 1 MiB-aligned single CatFS layout, and requires typing `ERASE` before it replaces the primary MBR table. It creates no EFI System Partition and installs no bootloader. A reboot discovers the resulting CatFS primary partition and mounts it at `/data`.
+The dedicated graphical installer is intentionally destructive. It selects one ATA PIO target, displays a cached MBR/filesystem preflight, lets the user choose a 1 MiB-aligned single CatFS layout, asks for a timezone preset and a hidden root password, and still requires typing `ERASE` before it replaces the primary MBR table. The password is stored only as the existing salted hash in CatFS; global configuration now follows the durable `/data/uiu/etc` path when CatFS is mounted. It creates no EFI System Partition and installs no bootloader. A reboot discovers the resulting CatFS primary partition and mounts it at `/data`.
+
+`mount hda1` and `fsck hda1` now address detected CatFS primary partitions; `fsck -y hda1` is refused while CatFS is mounted. The file-only `dd` command supports streaming `if=`, `of=`, `bs=`, `count=`, `skip=`, `seek=`, and `conv=notrunc` through VFS paths. It deliberately does not expose raw-disk writes. `timezone` stores bounded IANA-style identifiers, while `date` truthfully remains an uptime display until RTC/NTP wall-clock support exists. The `mouse` command reports PS/2 auxiliary-port initialization status, packet counters, and overflow drops; USB/HID mouse transport is not yet present.
+
+Use `gears` to open the TinyGL-Lite fixed-point software gears scene in Exp. `glxgears` is an explicit compatibility alias that explains that GLX/Mesa APIs are unavailable before opening the same software demo.
 
 Exp supports persistent image wallpapers from **PNG**, **JPEG**, and uncompressed **24/32-bit BMP** files. Open an image in Viewer and press `A`, or use `wallpaper /path/to/image` in the Exp terminal. The image is decoded once, cached separately from Viewer windows, aspect-preserved with cover scaling, and rendered through the VBE backbuffer. The VBE full-frame copy and filled-rectangle paths were also converted from bytewise/per-pixel public calls to direct memory/row writes, while mouse-only desktop redraws are coalesced.
 

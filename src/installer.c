@@ -7,6 +7,8 @@
 #include "partmgr.h"
 #include "catfs.h"
 #include "catfs_vfs.h"
+#include "config.h"
+#include "users.h"
 #include "util.h"
 #include <stdint.h>
 
@@ -26,6 +28,17 @@
 #define INSTALL_ALIGN_LBA 2048u
 #define INSTALL_MIN_SECTORS 2048u
 #define INSTALL_SIZE_STEP_SECTORS (64u*2048u)
+
+/* Presets cover the common global regions; the selected IANA-style identifier
+ * is persisted and can later be changed with the timezone command. ATMKoala
+ * still has no RTC/NTP wall-clock source, so this is a locale preference. */
+static const char *const installer_timezones[]={
+    "UTC","Europe/London","Europe/Berlin","Europe/Moscow","Asia/Dubai",
+    "Asia/Kolkata","Asia/Bangkok","Asia/Shanghai","Asia/Tokyo",
+    "Australia/Sydney","America/Sao_Paulo","America/New_York",
+    "America/Chicago","America/Denver","America/Los_Angeles","Pacific/Auckland"
+};
+#define INSTALL_TZ_COUNT ((int)(sizeof(installer_timezones)/sizeof(installer_timezones[0])))
 
 static void r(int x,int y,int w,int h,color32_t c){vbe_fill_rect(x,y,w,h,c);}
 static void box(int x,int y,int w,int h,color32_t c){vbe_draw_rect(x,y,w,h,c);}
@@ -50,7 +63,7 @@ static void installer_preflight(int drv,char *out,size_t cap){
     for(int i=0;i<PART_MAX_ENTRIES;i++){
         mbr_entry_t *e=&table.entries[i];
         if(!e->type||!e->sector_count)continue;
-        ksnprintf(out,cap,"Existing hda%d: %s / %s (%u MiB) will be replaced.",i+1,part_type_name(e->type),mbr_probe_filesystem(drv,e),e->sector_count/2048u);
+        ksnprintf(out,cap,"Existing hd%c%d: %s / %s (%u MiB) will be replaced.",'a'+drv,i+1,part_type_name(e->type),mbr_probe_filesystem(drv,e),e->sector_count/2048u);
         return;
     }
     ksnprintf(out,cap,"Valid empty MBR table: installer will create one CatFS partition.");
@@ -68,7 +81,7 @@ static void layout_clamp(int drv,uint32_t *start,uint32_t *sectors){
     if(*sectors<INSTALL_MIN_SECTORS)*sectors=INSTALL_MIN_SECTORS;
     if(*sectors>max){*start=INSTALL_ALIGN_LBA;*sectors=total-*start;*sectors-=*sectors%INSTALL_ALIGN_LBA;}
 }
-static int install_target_partition(int drv,uint32_t start,uint32_t sectors){
+static int install_target_partition(int drv,uint32_t start,uint32_t sectors,const char *timezone,const char *root_password){
     mbr_table_t table;
     if(drv<0||drv>=DISK_MAX_DRIVES||!disk_drives[drv].present||!start||sectors<INSTALL_MIN_SECTORS)return -1;
     if((uint64_t)start+(uint64_t)sectors>(uint64_t)drive_sectors(drv))return -1;
@@ -82,16 +95,22 @@ static int install_target_partition(int drv,uint32_t start,uint32_t sectors){
     if(catfs_path_mkdir("/home")<0||catfs_path_mkdir("/syls")<0||catfs_path_mkdir("/syls/bin")<0||
        catfs_path_mkdir("/uiu")<0||catfs_path_mkdir("/uiu/etc")<0||catfs_path_mkdir("/data")<0||catfs_path_mkdir("/tmp")<0)return -1;
     if(catfs_sync()<0)return -1;
-    return catfs_vfs_mount("/data");
+    if(catfs_vfs_mount("/data")<0)return -1;
+    /* The account implementation hashes and persists the selected root
+     * password in /data/uiu/etc/users.conf. No clear-text password is stored. */
+    if(!timezone||!timezone[0]||!root_password||user_set_password("root",root_password)<0)return -1;
+    if(sysconf_set("system","timezone",timezone)<0)return -1;
+    sysconf_save();
+    return 0;
 }
 
-static void frame(int step,int target,uint32_t start,uint32_t sectors,int erase_count,const char *status,const char *preflight){
+static void frame(int step,int target,uint32_t start,uint32_t sectors,int tz_idx,const char *root_password,int setup_field,int erase_count,const char *status,const char *preflight){
     int w=(int)vbe.width,h=(int)vbe.height; int px=(w-620)/2,py=(h-410)/2;
     r(0,0,w,h,BG); r(px,py,620,410,PANEL); box(px,py,620,410,LINE);
     r(px,py,620,48,ACCENT); text(px+22,py+15,"ATMKoala Disk Installer",PANEL,ACCENT);
     text(px+22,py+70,"Standalone installer boot mode",TEXT,PANEL);
     text(px+22,py+91,"Creates one aligned MBR CatFS partition; bootloader installation is not included.",SUB,PANEL);
-    for(int i=0;i<4;i++){int c=i<step?OK:(i==step?ACCENT:LINE);r(px+24+i*141,py+122,125,4,c);}
+    for(int i=0;i<5;i++){int shown=step>5?5:step;int c=i<shown?OK:(i==shown?ACCENT:LINE);r(px+24+i*112,py+122,96,4,c);}
     if(step==0){
         text(px+22,py+154,"Welcome",TEXT,PANEL);
         text(px+22,py+182,"The installer writes only after an explicit typed ERASE confirmation.",SUB,PANEL);
@@ -110,12 +129,19 @@ static void frame(int step,int target,uint32_t start,uint32_t sectors,int erase_
     }else if(step==2){
         char l1[128],l2[128];
         text(px+22,py+154,"Plan one aligned CatFS partition",TEXT,PANEL);
-        ksnprintf(l1,sizeof(l1),"Target: hda%d    Start LBA: %u (%u MiB)",target+1,start,start/2048u);
+        ksnprintf(l1,sizeof(l1),"Target: hd%c1    Start LBA: %u (%u MiB)",'a'+target,start,start/2048u);
         ksnprintf(l2,sizeof(l2),"Size: %u MiB (%u sectors)    End LBA: %u",sectors/2048u,sectors,start+sectors-1u);
         text(px+22,py+185,l1,TEXT,PANEL);text(px+22,py+210,l2,TEXT,PANEL);
         text(px+22,py+246,"Left/Right move start by 1 MiB. Up/Down change size by 64 MiB.",SUB,PANEL);
-        text(px+22,py+268,"Home restores the full usable disk layout. Press Enter to review destructive changes.",SUB,PANEL);
+        text(px+22,py+268,"Home restores the full usable disk layout. Press Enter for first-boot setup.",SUB,PANEL);
     }else if(step==3){
+        char line[128],masked[65];int n=(int)kstrlen(root_password);if(n>60)n=60;for(int i=0;i<n;i++)masked[i]='*';masked[n]=0;
+        text(px+22,py+154,"First-boot locale and root account",TEXT,PANEL);
+        ksnprintf(line,sizeof(line),"Timezone: %s%s",installer_timezones[tz_idx],setup_field==0?"  < selected":"");text(px+22,py+184,line,setup_field==0?ACCENT:TEXT,PANEL);
+        ksnprintf(line,sizeof(line),"Root password: %s%s",masked[0]?masked:"(minimum 4 characters)",setup_field==1?"  < selected":"");text(px+22,py+212,line,setup_field==1?ACCENT:TEXT,PANEL);
+        text(px+22,py+246,"Left/Right selects timezone; Tab selects password; it is never stored as clear text.",SUB,PANEL);
+        text(px+22,py+268,status&&status[0]?status:"Press Enter to continue after choosing a password of at least 4 characters.",status&&status[0]?WARN:SUB,PANEL);
+    }else if(step==4){
         char b[128],typed[32];
         text(px+22,py+154,"Confirm destructive MBR rewrite",WARN,PANEL);
         ksnprintf(b,sizeof(b),"hd%c1: CatFS, LBA %u..%u (%u MiB)",'a'+target,start,start+sectors-1u,sectors/2048u);
@@ -124,21 +150,21 @@ static void frame(int step,int target,uint32_t start,uint32_t sectors,int erase_
         ksnprintf(typed,sizeof(typed),"Type ERASE to unlock installation: %d/5",erase_count);
         text(px+22,py+250,typed,erase_count==5?OK:SUB,PANEL);
         text(px+22,py+274,erase_count==5?"Press Enter to write the table and format CatFS.":"Keyboard confirmation is required; mouse click cannot start the erase.",SUB,PANEL);
-    }else if(step==4){text(px+22,py+154,"Installing…",TEXT,PANEL);text(px+22,py+188,status,SUB,PANEL);
-    }else {text(px+22,py+154,status,step==5?OK:WARN,PANEL);text(px+22,py+188,"The CatFS partition is mounted at /data for this live installer session.",SUB,PANEL);text(px+22,py+220,"Press Esc or Finish to return to the shell, then reboot to leave installer mode.",SUB,PANEL);}
-    if(step<3){button(px+22,py+355,120,"Cancel",0);button(px+470,py+355,126,"Continue",target>=0);} else if(step==3)button(px+470,py+355,126,"Install",erase_count==5); else if(step>=5)button(px+470,py+355,126,"Finish",1);
+    }else if(step==5){text(px+22,py+154,"Installing…",TEXT,PANEL);text(px+22,py+188,status,SUB,PANEL);
+    }else {text(px+22,py+154,status,step==6?OK:WARN,PANEL);if(step==6){text(px+22,py+188,"CatFS is mounted at /data; timezone and root password were saved.",SUB,PANEL);}else text(px+22,py+188,"Installation failed; do not rely on the target until inspected.",WARN,PANEL);text(px+22,py+220,"Press Esc or Finish to return to the shell, then reboot to leave installer mode.",SUB,PANEL);}
+    if(step<4){button(px+22,py+355,120,"Cancel",0);button(px+470,py+355,126,"Continue",target>=0);} else if(step==4)button(px+470,py+355,126,"Install",erase_count==5); else if(step>=6)button(px+470,py+355,126,"Finish",1);
     vbe_present();
 }
 
 void installer_run(void){
-    int step=0,target=first_drive(),last_buttons=0,erase_count=0;uint32_t start=0,sectors=0;const char *status="";char preflight[144];
+    int step=0,target=first_drive(),last_buttons=0,erase_count=0,tz_idx=0,setup_field=0;uint32_t start=0,sectors=0;const char *status="";char preflight[144],root_password[65];kmemset(root_password,0,sizeof(root_password));
     int buffered=(vbe_double_buffer_enable()==0);
     if(target>=0)layout_default(target,&start,&sectors);
     installer_preflight(target,preflight,sizeof(preflight));
     for(;;){
-        frame(step,target,start,sectors,erase_count,status,preflight);
+        frame(step,target,start,sectors,tz_idx,root_password,setup_field,erase_count,status,preflight);
         int k=keyboard_poll();const mouse_state_t*m=mouse_state();int click=m&&m->available&&(m->buttons&1)&&!(last_buttons&1);if(m)last_buttons=m->buttons;
-        if(k==KEY_ESC){if(buffered)vbe_double_buffer_disable();return;}
+        if(k==KEY_ESC){kmemset(root_password,0,sizeof(root_password));if(buffered)vbe_double_buffer_disable();return;}
         if(step==0&&(k=='\n'||k=='\r'||(click&&inside(m->x,m->y,(int)vbe.width/2+160,(int)vbe.height/2+150,126,30)))){step=1;continue;}
         if(step==1){
             if(k==KEY_LEFT||k==KEY_UP){target=next_drive(target,-1);layout_default(target,&start,&sectors);installer_preflight(target,preflight,sizeof(preflight));}
@@ -152,17 +178,28 @@ void installer_run(void){
             else if(k==KEY_UP){if(sectors<=drive_sectors(target)-start-INSTALL_SIZE_STEP_SECTORS)sectors+=INSTALL_SIZE_STEP_SECTORS;layout_clamp(target,&start,&sectors);}
             else if(k==KEY_DOWN){if(sectors>INSTALL_MIN_SECTORS+INSTALL_SIZE_STEP_SECTORS)sectors-=INSTALL_SIZE_STEP_SECTORS;else sectors=INSTALL_MIN_SECTORS;layout_clamp(target,&start,&sectors);}
             else if(k==KEY_HOME){layout_default(target,&start,&sectors);}
-            else if((k=='\n'||k=='\r'||(click&&inside(m->x,m->y,(int)vbe.width/2+160,(int)vbe.height/2+150,126,30)))&&sectors>=INSTALL_MIN_SECTORS){erase_count=0;step=3;}
+            else if((k=='\n'||k=='\r'||(click&&inside(m->x,m->y,(int)vbe.width/2+160,(int)vbe.height/2+150,126,30)))&&sectors>=INSTALL_MIN_SECTORS){setup_field=0;step=3;}
             continue;
         }
         if(step==3){
+            size_t plen=kstrlen(root_password);
+            if(k==KEY_TAB){setup_field^=1;status="";}
+            else if(setup_field==0&&(k==KEY_LEFT||k==KEY_UP)){tz_idx=(tz_idx+INSTALL_TZ_COUNT-1)%INSTALL_TZ_COUNT;}
+            else if(setup_field==0&&(k==KEY_RIGHT||k==KEY_DOWN)){tz_idx=(tz_idx+1)%INSTALL_TZ_COUNT;}
+            else if(setup_field==1&&k==KEY_BACKSPACE&&plen>0){root_password[plen-1]=0;}
+            else if(setup_field==1&&k>=0x21&&k<0x7f&&plen+1<sizeof(root_password)){root_password[plen]=(char)k;root_password[plen+1]=0;}
+            else if((k=='\n'||k=='\r')&&plen>=4){erase_count=0;status="";step=4;}
+            else if((k=='\n'||k=='\r'))status="Root password must have at least 4 characters.";
+            continue;
+        }
+        if(step==4){
             static const char confirm[]="ERASE";
             if(k==KEY_BACKSPACE&&erase_count>0)erase_count--;
             else if(k>0&&k<0x80&&erase_count<5){char ch=(char)k;if(ch>='a'&&ch<='z')ch-=32;if(ch==confirm[erase_count])erase_count++;else erase_count=(ch==confirm[0])?1:0;}
-            if((k=='\n'||k=='\r')&&erase_count==5){step=4;status="Writing MBR and formatting the selected CatFS partition…";frame(step,target,start,sectors,erase_count,status,preflight);step=install_target_partition(target,start,sectors)==0?5:6;status=step==5?"Installation completed successfully.":"Installation failed after the destructive confirmation.";}
+            if((k=='\n'||k=='\r')&&erase_count==5){step=5;status="Writing MBR, CatFS, timezone and root account…";frame(step,target,start,sectors,tz_idx,root_password,setup_field,erase_count,status,preflight);step=install_target_partition(target,start,sectors,installer_timezones[tz_idx],root_password)==0?6:7;status=step==6?"Installation completed successfully.":"Installation failed after the destructive confirmation.";}
             continue;
         }
-        if(step==5||step==6){if(k=='\n'||k=='\r'||(click&&inside(m->x,m->y,(int)vbe.width/2+160,(int)vbe.height/2+150,126,30))){if(buffered)vbe_double_buffer_disable();return;}}
+        if(step==6||step==7){if(k=='\n'||k=='\r'||(click&&inside(m->x,m->y,(int)vbe.width/2+160,(int)vbe.height/2+150,126,30))){kmemset(root_password,0,sizeof(root_password));if(buffered)vbe_double_buffer_disable();return;}}
         __asm__ volatile("pause");
     }
 }

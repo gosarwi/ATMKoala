@@ -343,10 +343,10 @@ static void readline_v6(char *out, int maxlen) {
     /* Tab completion candidates */
     static const char *builtins[] = {
         "ls","ll","la","cat","view","less","head","tail","file","hd","hexdump","wc",
-        "grep","sort","uniq","cut","tr","tee","find","tree","write","append","touch",
+        "grep","sort","uniq","cut","tr","tee","find","tree","write","append","touch","dd",
         "rm","cp","mv","mkdir","rmdir","cd","pwd","stat","chmod","chown","ln",
         "ps","kill","sleep","wait","sh","source","uname","info","hwinfo","lscpu","cpucompat",
-        "uptime","mem","free","dmesg","date","hostname","whoami","id","env","set",
+        "uptime","mem","free","dmesg","date","timezone","gears","glxgears","hostname","whoami","id","env","set",
         "unset","export","printenv","lsblk","df","du","mount","umount","mkfs","sync",
         "ifconfig","netstat","ping","arp","route","unm","untui","netui",
         "diskmgr","fdisk","cfdisk",
@@ -1961,6 +1961,28 @@ void dispatch(char *line) {
         while((n=vfs_read(fs,t,512))>0) vfs_write(fd2,t,(uint32_t)n);
         vfs_close(fs); vfs_close(fd2); cprintf("'%s' -> '%s'\n",sp,dp);
     }
+    else if (!kstrcmp(cmd,"dd")) {
+        const char *infile=NULL,*outfile=NULL;uint32_t bs=512,count=0xFFFFFFFFu,skip=0,seek=0;int notrunc=0;
+        for(int i=1;i<argc;i++){
+            const char *a=argv[i];
+            if(!kstrncmp(a,"if=",3))infile=a+3; else if(!kstrncmp(a,"of=",3))outfile=a+3;
+            else if(!kstrncmp(a,"bs=",3))bs=kstrtou(a+3,10); else if(!kstrncmp(a,"count=",6))count=kstrtou(a+6,10);
+            else if(!kstrncmp(a,"skip=",5))skip=kstrtou(a+5,10); else if(!kstrncmp(a,"seek=",5))seek=kstrtou(a+5,10);
+            else if(!kstrcmp(a,"conv=notrunc"))notrunc=1; else {C_ERR();cprintf("dd: unsupported operand %s\n",a);C_NRM();goto done;}
+        }
+        if(!infile||!outfile||!bs||bs>4096u){C_ERR();con_writeln("dd: usage: dd if=FILE of=FILE [bs=1..4096] [count=N] [skip=N] [seek=N] [conv=notrunc]");C_NRM();goto done;}
+        char inpath[128],outpath[128];build_abs(infile,inpath);build_abs(outfile,outpath);
+        if(!kstrcmp(inpath,outpath)){C_ERR();con_writeln("dd: input and output must differ");C_NRM();goto done;}
+        uint64_t inoff=(uint64_t)skip*bs,outoff=(uint64_t)seek*bs;
+        if(inoff>0x7fffffffu||outoff>0x7fffffffu){C_ERR();con_writeln("dd: seek range exceeds current VFS limit");C_NRM();goto done;}
+        int infd=vfs_open(inpath,O_RDONLY,0),outfd=vfs_open(outpath,O_WRONLY|O_CREAT|(notrunc?0:O_TRUNC),0644);
+        if(infd<0||outfd<0){if(infd>=0)vfs_close(infd);if(outfd>=0)vfs_close(outfd);C_ERR();con_writeln("dd: cannot open input or output path");C_NRM();goto done;}
+        if(vfs_lseek(infd,(int64_t)inoff,SEEK_SET)<0||vfs_lseek(outfd,(int64_t)outoff,SEEK_SET)<0){vfs_close(infd);vfs_close(outfd);C_ERR();con_writeln("dd: seek failed");C_NRM();goto done;}
+        static uint8_t ddbuf[4096];uint64_t copied=0;uint32_t records=0;int failed=0;
+        while(records<count){int64_t nr=vfs_read(infd,ddbuf,bs);if(nr<=0)break;uint32_t off=0;while(off<(uint32_t)nr){int64_t nw=vfs_write(outfd,ddbuf+off,(uint32_t)nr-off);if(nw<=0){failed=1;break;}off+=(uint32_t)nw;}if(failed)break;copied+=(uint64_t)nr;records++;if((uint32_t)nr<bs)break;}
+        vfs_close(infd);vfs_close(outfd);if(catfs_vfs_is_mounted())(void)catfs_sync();
+        char num[32];ku64toa(copied,num,10);if(failed){C_ERR();con_writeln("dd: write failed");C_NRM();}else cprintf("dd: %u record(s), %s byte(s) copied (VFS files only)\n",records,num);
+    }
     else if (!kstrcmp(cmd,"mv")) {
         if(argc<3) goto done;
         char sp[128],dp[128]; build_abs(argv[1],sp); build_abs(argv[2],dp);
@@ -2053,8 +2075,18 @@ void dispatch(char *line) {
         con_writeln("[    0.010] Shell ready");
     }
     else if (!kstrcmp(cmd,"date")) {
-        uint32_t s=sched_uptime_ticks()/100;
-        cprintf("atmkoala  uptime %u seconds\n(RTC not implemented === install NTP module)\n",s);
+        uint32_t s=sched_uptime_ticks()/100;const char *tz=sysconf_get("system","timezone");
+        cprintf("atmkoala uptime %u seconds  timezone=%s\n",s,tz&&tz[0]?tz:"UTC");
+        con_writeln("Wall clock is unavailable until RTC or NTP synchronization is implemented.");
+    }
+    else if (!kstrcmp(cmd,"timezone")) {
+        if(argc==1){const char *tz=sysconf_get("system","timezone");cprintf("timezone: %s\n",tz&&tz[0]?tz:"UTC");con_writeln("usage: timezone [IANA-style name] | timezone list");goto done;}
+        if(!kstrcmp(argv[1],"list")){con_writeln("UTC Europe/London Europe/Berlin Europe/Moscow Asia/Dubai Asia/Kolkata Asia/Shanghai Asia/Tokyo");con_writeln("America/New_York America/Chicago America/Denver America/Los_Angeles Australia/Sydney Pacific/Auckland");con_writeln("Any bounded IANA-style identifier may be stored; offset conversion needs RTC/NTP.");goto done;}
+        const char *tz=!kstrcmp(argv[1],"set")&&argc>=3?argv[2]:argv[1];int valid=tz[0]&&kstrlen(tz)<64;
+        for(const char *p=tz;*p&&valid;p++)if(!((*p>='A'&&*p<='Z')||(*p>='a'&&*p<='z')||(*p>='0'&&*p<='9')||*p=='/'||*p=='_'||*p=='+'||*p=='-'))valid=0;
+        if(!valid){C_ERR();con_writeln("timezone: use a bounded IANA-style identifier (for example Europe/Moscow)");C_NRM();goto done;}
+        if(sysconf_set("system","timezone",tz)<0){C_ERR();con_writeln("timezone: configuration capacity reached");C_NRM();goto done;}
+        sysconf_save();C_OK();cprintf("timezone: saved %s\n",tz);C_NRM();
     }
     else if (!kstrcmp(cmd,"hostname")) {
         if(argc>1){kstrcpy(hostname,argv[1]);sysconf_set("system","hostname",hostname);}
@@ -2122,6 +2154,11 @@ void dispatch(char *line) {
         if(!hosts) con_writeln("  no PCI USB host controller detected");
         C_DIM();con_writeln("USB device enumeration and BOT/SCSI mass-storage transport are not implemented; no USB disk is exposed as a block device yet.");C_NRM();
     }
+    else if (!kstrcmp(cmd,"mouse")) {
+        const mouse_state_t *ms=mouse_state();
+        cprintf("mouse: %s  available=%s pos=%d,%d buttons=0x%x packets=%u dropped=%u\n",mouse_status_string(),ms&&ms->available?"yes":"no",ms?ms->x:0,ms?ms->y:0,ms?ms->buttons:0,ms?ms->packets:0,ms?ms->dropped_packets:0);
+        if(!ms||!ms->available)con_writeln("mouse: only legacy PS/2 auxiliary input is implemented; USB/HID mouse transport is not available yet.");
+    }
     else if (!kstrcmp(cmd,"df")) {
         con_writeln("Filesystem  1K-blocks   Used  Avail  Use%  Mounted");
         con_writeln("ramfs             n/a    n/a    n/a     -  /");
@@ -2136,12 +2173,14 @@ void dispatch(char *line) {
         if(vfs_stat(p,&st)==0) cprintf("%u\t%s\n",(st.size+1023)/1024,p);
     }
     else if (!kstrcmp(cmd,"mount")) {
-        int drv=0;
-        if(argc>=2&&argv[1][0]=='h'&&argv[1][1]=='d') drv=argv[1][2]-'a';
+        int drv=0,part=-1,rc=-1;const char *dev=argc>=2?argv[1]:"hda";
+        if(dev[0]=='h'&&dev[1]=='d'&&dev[2]>='a'&&dev[2]<'a'+DISK_MAX_DRIVES){drv=dev[2]-'a';if(dev[3]>='1'&&dev[3]<='4'&&dev[4]==0)part=dev[3]-'1';}
         if(!disk_drives[drv].present){C_ERR();cprintf("mount: hd%c: not found\n",'a'+drv);C_NRM();goto done;}
-        if(catfs_mount(drv)<0){C_WRN();con_writeln("Not formatted === run 'mkfs'");C_NRM();goto done;}
+        if(part>=0){mbr_table_t table;if(mbr_read(drv,&table)==0&&mbr_validate_drive(drv,&table)==0&&table.entries[part].type&&table.entries[part].sector_count)rc=catfs_mount_at(drv,table.entries[part].lba_start);}
+        else rc=catfs_mount(drv);
+        if(rc<0){C_WRN();con_writeln("mount: target is not a valid CatFS volume");C_NRM();goto done;}
         if(catfs_vfs_mount("/data")<0){catfs_sync();catfs.mounted=0;C_ERR();con_writeln("mount: VFS adapter failed");C_NRM();goto done;}
-        live_mode=0; C_OK(); cprintf("Mounted hd%c on /data\n",'a'+drv); C_NRM();
+        live_mode=0; C_OK(); cprintf("Mounted %s on /data\n",dev); C_NRM();
     }
     else if (!kstrcmp(cmd,"umount")) {
         catfs_vfs_unmount(); live_mode=1; catfs_sync(); catfs.mounted=0;
@@ -2157,6 +2196,17 @@ void dispatch(char *line) {
         if(catfs_format(drv,"catfs")<0){C_ERR();con_writeln("mkfs: failed");C_NRM();}
         else if(catfs_vfs_mount("/data")<0){catfs_sync();catfs.mounted=0;C_ERR();con_writeln("mkfs: VFS adapter failed");C_NRM();}
         else{live_mode=0;C_OK();cprintf("Formatted hd%c as QewoxFS and mounted on /data\n",'a'+drv);C_NRM();}
+    }
+    else if (!kstrcmp(cmd,"fsck")) {
+        int repair=argc>=2&&!kstrcmp(argv[1],"-y"),arg=repair?2:1;
+        if(argc<=arg){con_writeln("fsck: usage: fsck [-y] hda1 (CatFS primary partition)");goto done;}
+        const char *dev=argv[arg];
+        if(dev[0]!='h'||dev[1]!='d'||dev[2]<'a'||dev[2]>='a'+DISK_MAX_DRIVES||dev[3]<'1'||dev[3]>'4'||dev[4]){con_writeln("fsck: expected hda1 through hdd4");goto done;}
+        int drv=dev[2]-'a',part=dev[3]-'1';mbr_table_t table;
+        if(!disk_drives[drv].present||mbr_read(drv,&table)<0||mbr_validate_drive(drv,&table)<0||!table.entries[part].type||!table.entries[part].sector_count||kstrcmp(mbr_probe_filesystem(drv,&table.entries[part]),"CatFS")){con_writeln("fsck: target is not a detected CatFS primary partition");goto done;}
+        if(repair&&catfs.mounted){con_writeln("fsck: -y refused while CatFS is mounted; run umount first");goto done;}
+        int issues=catfs_fsck_at(drv,table.entries[part].lba_start,repair);
+        if(issues<0){C_ERR();con_writeln("fsck: check failed");C_NRM();}else cprintf("fsck: %s: %d issue(s)%s\n",dev,issues,repair?" repaired where possible":"");
     }
     else if (!kstrcmp(cmd,"sync"))   { if(catfs.mounted){catfs_sync();C_OK();con_writeln("Synced.");C_NRM();}else{C_WRN();con_writeln("No disk mounted.");C_NRM();} }
     /* Network */
@@ -2523,6 +2573,11 @@ void dispatch(char *line) {
         if(!use_vbe || !exp_is_active()){C_ERR();con_writeln("notepad: open Exp first with 'de'");C_NRM();goto done;}
         if(exp_open_app(APP_NOTEPAD,NULL)<0){C_ERR();con_writeln("notepad: no free window slot");C_NRM();}
     }
+    else if (!kstrcmp(cmd,"gears") || !kstrcmp(cmd,"glxgears")) {
+        if(!use_vbe||!exp_is_active()){C_ERR();con_writeln("gears: open Exp first with 'de'");C_NRM();goto done;}
+        if(!kstrcmp(cmd,"glxgears"))con_writeln("glxgears: GLX and Mesa APIs are unavailable; opening TinyGL-Lite software gears demo.");
+        if(exp_open_app(APP_TINYGL,NULL)<0){C_ERR();con_writeln("gears: no free desktop window");C_NRM();}
+    }
     else if (!kstrcmp(cmd,"wallpaper")) {
         if(!use_vbe||!exp_is_active()){C_ERR();con_writeln("wallpaper: open Exp first with 'de'");C_NRM();goto done;}
         if(argc<2){cprintf("wallpaper: %s\n",exp_wallpaper_current());goto done;}
@@ -2683,11 +2738,11 @@ void dispatch(char *line) {
         C_HDR(); con_writeln("atmkoala v0.5 === Command Reference"); C_NRM();
         con_writeln("  Run 'info' for system details, 'man <cmd>' for command help\n");
         const char *grps[][2] = {
-            {"Files",   "ls ll la cat view less head tail file hd hexdump wc grep sort uniq cut tr tee"},
+            {"Files",   "ls ll la cat view less head tail file hd hexdump wc grep sort uniq cut tr tee dd"},
             {"Edit",    "write append touch rm cp mv mkdir rmdir tree find stat chmod chown ln"},
-            {"Apps",    "de  gui open <id>  notepad  files  editor  monitor  settings  wallpaper [path]"},
-            {"Disk",    "lsblk df du mount umount mkfs sync live"},
-            {"System",  "uname info hwinfo lscpu cpucompat uptime mem free ps kill dmesg date which man modules"},
+            {"Apps",    "de  gui open <id>  notepad  files  editor  monitor  settings  gears  glxgears  wallpaper [path]"},
+            {"Disk",    "lsblk df du mount [hda1] umount mkfs fsck [-y] hda1 sync live"},
+            {"System",  "uname info hwinfo lscpu cpucompat uptime mem free ps kill mouse dmesg date timezone which man modules"},
             {"Network", "ifconfig netstat ping arp route unm connect|disconnect|status|profiles|save untui"},
             {"Users",   "users adduser deluser usermod passwd login logout sudo su whoami id"},
             {"Services","openrc rc-status rc 1|3|5 rc-service rc-update"},

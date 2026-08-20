@@ -3,6 +3,7 @@
  */
 #include "config.h"
 #include "vfs.h"
+#include "catfs_vfs.h"
 #include "util.h"
 #include <stdint.h>
 #include <stddef.h>
@@ -11,6 +12,16 @@ cfg_file_t g_syscfg  = {0};
 cfg_file_t g_netcfg  = {0};
 cfg_file_t g_usercfg = {0};
 cfg_file_t g_pkgcfg  = {0};
+
+/* `/uiu/etc` is RAMFS in live mode. Once CatFS is mounted at `/data`,
+ * persist global configuration alongside the durable users/init records. */
+static const char *config_root(void){return catfs_vfs_is_mounted()?"/data/uiu/etc":CFG_ROOT;}
+static void config_path(char *out,size_t cap,const char *name){
+    if(!out||!cap)return;
+    kstrcpy(out,config_root());
+    if(kstrlen(out)+1+kstrlen(name)>=cap){out[0]=0;return;}
+    kstrcat(out,"/");kstrcat(out,name);
+}
 
 /* ── Parser ─────────────────────────────────────────────────── */
 int cfg_parse(cfg_file_t *cfg, const char *buf, const char *path) {
@@ -190,13 +201,16 @@ int sysconf_set(const char *section, const char *key, const char *val) {
     return cfg_set(&g_syscfg, section, key, val);
 }
 void sysconf_save(void) {
-    cfg_save(&g_syscfg, CFG_ROOT "/system.conf");
+    char path[128];config_path(path,sizeof(path),"system.conf");
+    if(path[0])cfg_save(&g_syscfg,path);
 }
 
 void config_init(void) {
-    /* Load system config — VFS must be mounted first */
-    cfg_load(&g_syscfg,  CFG_ROOT "/system.conf");
-    cfg_load(&g_netcfg,  CFG_ROOT "/network.conf");
-    cfg_load(&g_usercfg, CFG_ROOT "/users.conf");
-    cfg_load(&g_pkgcfg,  CFG_ROOT "/packages.conf");
+    /* Load from CatFS when it is available; live mode deliberately keeps the
+     * same config contract in RAMFS. */
+    char path[128];
+    config_path(path,sizeof(path),"system.conf");   if(path[0])cfg_load(&g_syscfg,path);
+    config_path(path,sizeof(path),"network.conf");  if(path[0])cfg_load(&g_netcfg,path);
+    config_path(path,sizeof(path),"users.conf");    if(path[0])cfg_load(&g_usercfg,path);
+    config_path(path,sizeof(path),"packages.conf"); if(path[0])cfg_load(&g_pkgcfg,path);
 }

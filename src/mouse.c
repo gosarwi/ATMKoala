@@ -18,6 +18,11 @@
 #define MOUSE_CMD_DEFAULTS 0xF6
 #define MOUSE_CMD_ENABLE   0xF4
 #define MOUSE_ACK          0xFA
+#define MOUSE_RESEND       0xFE
+
+enum { MOUSE_INIT_NONE=0, MOUSE_INIT_ENABLE_AUX, MOUSE_INIT_READ_CFG,
+       MOUSE_INIT_WRITE_CFG, MOUSE_INIT_DEFAULTS, MOUSE_INIT_ENABLE,
+       MOUSE_INIT_READY };
 
 static mouse_state_t g_mouse;
 static int g_screen_w=800, g_screen_h=600;
@@ -66,8 +71,13 @@ static int mouse_write(uint8_t value) {
 }
 
 static int mouse_command(uint8_t value) {
-    uint8_t reply=0;
-    return mouse_write(value) && wait_aux_byte(&reply) && reply==MOUSE_ACK;
+    for(int attempt=0;attempt<3;attempt++){
+        uint8_t reply=0;
+        if(!mouse_write(value)||!wait_aux_byte(&reply))return 0;
+        if(reply==MOUSE_ACK)return 1;
+        if(reply!=MOUSE_RESEND)return 0;
+    }
+    return 0;
 }
 
 static void mouse_irq(registers_t *r) {
@@ -83,7 +93,7 @@ static void mouse_irq(registers_t *r) {
     g_packet_pos=0;
 
     uint8_t flags=g_packet[0];
-    if (flags&0xC0) return; /* X/Y overflow: discard this packet */
+    if (flags&0xC0) { g_mouse.dropped_packets++; return; } /* X/Y overflow: discard this packet */
     int dx=(int)g_packet[1]; if (flags&0x10) dx-=256;
     int dy=(int)g_packet[2]; if (flags&0x20) dy-=256;
     int nx=g_mouse.x+dx;
@@ -92,6 +102,7 @@ static void mouse_irq(registers_t *r) {
     if (ny<0) ny=0; else if (ny>=g_screen_h) ny=g_screen_h-1;
     g_mouse.x=nx; g_mouse.y=ny;
     g_mouse.buttons=(uint8_t)(flags&0x07);
+    g_mouse.packets++;
 }
 
 void mouse_init(int screen_w, int screen_h) {
@@ -103,27 +114,38 @@ void mouse_init(int screen_w, int screen_h) {
 
     /* No controller reply must block boot: absence simply disables the cursor. */
     cpu_cli();
-    if (!controller_write(PS2_CMD_ENABLE_AUX)) { cpu_sti(); return; }
+    if (!controller_write(PS2_CMD_ENABLE_AUX)) { g_mouse.init_status=MOUSE_INIT_ENABLE_AUX; cpu_sti(); return; }
 
     uint8_t cfg=0;
     /* Command-byte replies originate from the controller, not the auxiliary
      * device. Preserve its translation bit or keyboard scancodes change set. */
-    if (!controller_write(PS2_CMD_READ_CFG) || !wait_output_byte(&cfg)) { cpu_sti(); return; }
+    if (!controller_write(PS2_CMD_READ_CFG) || !wait_output_byte(&cfg)) { g_mouse.init_status=MOUSE_INIT_READ_CFG; cpu_sti(); return; }
     cfg|=0x02;       /* enable IRQ12 */
     cfg&=(uint8_t)~0x20; /* enable auxiliary clock */
-    if (!controller_write(PS2_CMD_WRITE_CFG) || !wait_input_clear()) { cpu_sti(); return; }
+    if (!controller_write(PS2_CMD_WRITE_CFG) || !wait_input_clear()) { g_mouse.init_status=MOUSE_INIT_WRITE_CFG; cpu_sti(); return; }
     outb(PS2_DATA,cfg);
 
-    if (!mouse_command(MOUSE_CMD_DEFAULTS) || !mouse_command(MOUSE_CMD_ENABLE)) {
-        cpu_sti(); return;
-    }
+    if (!mouse_command(MOUSE_CMD_DEFAULTS)) { g_mouse.init_status=MOUSE_INIT_DEFAULTS; cpu_sti(); return; }
+    if (!mouse_command(MOUSE_CMD_ENABLE)) { g_mouse.init_status=MOUSE_INIT_ENABLE; cpu_sti(); return; }
 
     irq_install_handler(12,mouse_irq);
     /* Unmask cascade IRQ2 and mouse IRQ12 on the legacy PIC. */
     outb(0x21,(uint8_t)(inb(0x21)&(uint8_t)~0x04));
     outb(0xA1,(uint8_t)(inb(0xA1)&(uint8_t)~0x10));
     g_mouse.available=1;
+    g_mouse.init_status=MOUSE_INIT_READY;
     cpu_sti();
 }
 
 const mouse_state_t *mouse_state(void) { return &g_mouse; }
+const char *mouse_status_string(void){
+    switch(g_mouse.init_status){
+    case MOUSE_INIT_READY:return "ready";
+    case MOUSE_INIT_ENABLE_AUX:return "PS/2 controller did not enable auxiliary port";
+    case MOUSE_INIT_READ_CFG:return "PS/2 controller configuration read timed out";
+    case MOUSE_INIT_WRITE_CFG:return "PS/2 controller configuration write timed out";
+    case MOUSE_INIT_DEFAULTS:return "mouse did not acknowledge defaults command";
+    case MOUSE_INIT_ENABLE:return "mouse did not acknowledge streaming-enable command";
+    default:return "not initialized";
+    }
+}

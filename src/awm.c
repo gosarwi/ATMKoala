@@ -20,7 +20,7 @@ void awm_init(void) {
     awm_register_app("terminal", "Terminal", "System", 1);
     awm_register_app("files", "Files", "System", 1);
     awm_register_app("settings", "Settings", "System", 1);
-    awm_register_app("tinygl", "TinyGL Demo", "Graphics", 1);
+    awm_register_app("tinygl", "TinyGL Gears (software)", "Graphics", 1);
     awm_register_app("mines", "Minesweeper", "Games", 1);
     awm_register_app("snake", "Snake", "Games", 1);
 }
