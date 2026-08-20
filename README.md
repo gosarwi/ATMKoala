@@ -81,6 +81,7 @@ Original ATMKoala code is released under the [MIT License](LICENSE). Third-party
 
 ## Documentation
 
+* [Developer guide: applications, Exp, native ABI, packages and testing (Russian)](DEVELOPER_GUIDE_RU.md)
 * [Limine-only boot path](V09_LIMINE_BOOT_PATH_RU.md)
 * [Detailed v0.9 overview (Russian)](ATMKOALA_V09_DETAILED_OVERVIEW_RU.md)
 * [Native socket ABI](V09_USER_SOCKET_ABI_RU.md)
