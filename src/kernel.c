@@ -346,11 +346,11 @@ static void readline_v6(char *out, int maxlen) {
         "grep","sort","uniq","cut","tr","tee","find","tree","write","append","touch","dd",
         "rm","cp","mv","mkdir","rmdir","cd","pwd","stat","chmod","chown","ln",
         "ps","kill","sleep","wait","sh","source","uname","info","hwinfo","lscpu","cpucompat",
-        "uptime","mem","free","dmesg","date","timezone","gears","glxgears","hostname","whoami","id","env","set",
-        "unset","export","printenv","lsblk","df","du","mount","umount","mkfs","sync",
+        "uptime","mem","free","dmesg","date","timezone","cube","gears","glxgears","hostname","whoami","id","env","set",
+        "unset","export","printenv","lsblk","swap","gpu","df","du","mount","umount","mkfs","sync",
         "ifconfig","netstat","ping","arp","route","unm","untui","netui",
         "diskmgr","fdisk","cfdisk",
-        "readelf","exec","sdk","serial","modinfo","malloc","which","man","history",
+        "readelf","exec","sdk","serial","modinfo","malloc","which","man","history","nano","calc","bc",
         "clear","reset","logo","echo","printf","de","install","live","modules","aiy",
         "help","reboot","halt","poweroff","sudo","su","login","logout","adduser","deluser","usermod","passwd","users","openrc","rc","rc-status","rc-service","service","rc-update","initctl","xargs","atm-box","atmbox","busybox",
         /* v10 new */
@@ -1660,9 +1660,14 @@ void dispatch(char *line) {
         goto done;
     }
     if (!kstrcmp(cmd,"login")) {
-        if(argc!=2) { C_ERR(); con_writeln("usage: login NAME"); C_NRM(); goto done; }
+        if(argc!=2) {
+            con_writeln("Available accounts (choose with: login NAME):");
+            for(int ui=0;ui<user_count();ui++){const user_account_t *u=user_at(ui);if(u&&u->active)cprintf("  %s  (%s)\n",u->name,user_role_name(u->role));}
+            con_writeln("New development accounts use password 'atmkoala' until changed with passwd.");
+            goto done;
+        }
         char password[64]; read_secret("Password: ",password,sizeof(password));
-        if(user_login(argv[1],password)==0) { apply_session_environment(); C_OK(); con_write("Logged in as "); con_writeln(argv[1]); C_NRM(); }
+        if(user_login(argv[1],password)==0) { apply_session_environment(); C_OK(); con_write("Hello, "); con_write(argv[1]); con_writeln("!"); C_NRM(); }
         else { C_ERR(); con_writeln("login: authentication failure"); C_NRM(); }
         goto done;
     }
@@ -2082,7 +2087,7 @@ void dispatch(char *line) {
     }
     else if (!kstrcmp(cmd,"timezone")) {
         if(argc==1){const char *tz=sysconf_get("system","timezone");cprintf("timezone: %s\n",tz&&tz[0]?tz:"UTC");con_writeln("usage: timezone [IANA-style name] | timezone list");goto done;}
-        if(!kstrcmp(argv[1],"list")){con_writeln("UTC Europe/London Europe/Berlin Europe/Moscow Asia/Dubai Asia/Kolkata Asia/Shanghai Asia/Tokyo");con_writeln("America/New_York America/Chicago America/Denver America/Los_Angeles Australia/Sydney Pacific/Auckland");con_writeln("Any bounded IANA-style identifier may be stored; offset conversion needs RTC/NTP.");goto done;}
+        if(!kstrcmp(argv[1],"list")){con_writeln("UTC  Europe/London Lisbon Paris Berlin Warsaw Kyiv Moscow Istanbul");con_writeln("Africa/Cairo Johannesburg  Asia/Dubai Karachi Kolkata Dhaka Bangkok Jakarta Shanghai Singapore Seoul Tokyo Manila");con_writeln("Australia/Perth Adelaide Sydney  Pacific/Auckland Honolulu");con_writeln("America/Sao_Paulo Argentina/Buenos_Aires New_York Toronto Chicago Mexico_City Denver Phoenix Los_Angeles Anchorage");con_writeln("Any bounded IANA-style identifier may be stored; wall-clock offset conversion needs RTC/NTP.");goto done;}
         const char *tz=!kstrcmp(argv[1],"set")&&argc>=3?argv[2]:argv[1];int valid=tz[0]&&kstrlen(tz)<64;
         for(const char *p=tz;*p&&valid;p++)if(!((*p>='A'&&*p<='Z')||(*p>='a'&&*p<='z')||(*p>='0'&&*p<='9')||*p=='/'||*p=='_'||*p=='+'||*p=='-'))valid=0;
         if(!valid){C_ERR();con_writeln("timezone: use a bounded IANA-style identifier (for example Europe/Moscow)");C_NRM();goto done;}
@@ -2142,6 +2147,28 @@ void dispatch(char *line) {
             C_WRN();con_writeln("No ATA PIO block disks detected.");
             con_writeln("Use an IDE/ATA drive in the current build; AHCI, NVMe and USB mass-storage are not block drivers yet.");C_NRM();
         }
+    }
+    else if (!kstrcmp(cmd,"swap")) {
+        int found=0;
+        con_writeln("swap: inventory only; ATMKoala has no virtual-memory pager or active swap backing store.");
+        for(int i=0;i<DISK_MAX_DRIVES;i++){
+            mbr_table_t table;if(!disk_drives[i].present||mbr_read(i,&table)<0||mbr_validate_drive(i,&table)<0)continue;
+            for(int p=0;p<PART_MAX_ENTRIES;p++){mbr_entry_t *e=&table.entries[p];if(e->type!=PART_TYPE_LINUX_SWAP||!e->sector_count)continue;cprintf("  hd%c%d: Linux-swap MBR type, %u MiB, LBA %u (detected; inactive)\n",'a'+i,p+1,e->sector_count/2048u,e->lba_start);found++;}
+        }
+        if(!found)con_writeln("  no primary MBR Linux-swap (0x82) partition detected on ATA PIO disks.");
+        con_writeln("  No page file, swap partition activation, eviction, or swap I/O driver is implemented.");
+    }
+    else if (!kstrcmp(cmd,"gpu")) {
+        int found=0;con_writeln("=== PCI graphics diagnostics ===");
+        for(int i=0;i<g_pci.count;i++){
+            pci_device_t *p=&g_pci.devs[i];if(p->class_code!=0x03)continue;found++;
+            const char *vendor=p->vendor==PCI_VENDOR_INTEL?"Intel":p->vendor==0x10DE?"NVIDIA":p->vendor==0x1002?"AMD":"unknown vendor";
+            const char *state="PCI device detected; no native hardware GPU driver";
+            if(p->vendor==PCI_VENDOR_INTEL&&p->device==PCI_DEV_UHD600)state=g_i915.initialized?"Intel UHD 600 VBE/framebuffer helper active; no 3D acceleration":"Intel UHD 600 detected; framebuffer helper inactive";
+            cprintf("  %02x:%02x.%u  %s %04x:%04x class 03:%02x IRQ%u — %s\n",p->bus,p->dev,p->fn,vendor,p->vendor,p->device,p->subclass,p->irq,state);
+        }
+        if(!found)con_writeln("  no PCI display controller (class 0x03) found.");
+        con_writeln("Display output uses the boot-provided VBE framebuffer where available; TinyGL-Lite is CPU software rendering, not a GPU driver.");
     }
     else if (!kstrcmp(cmd,"usb")) {
         int hosts=0;
@@ -2571,14 +2598,23 @@ void dispatch(char *line) {
         if(!kstrcmp(argv[1],"open")&&argc>=3){if(exp_gui_open(argv[2])<0){C_ERR();con_writeln("gui: unknown app or no free window slot");C_NRM();}}
         else con_writeln("gui: open <application-id>");
     }
-    else if (!kstrcmp(cmd,"notepad")) {
-        if(!use_vbe || !exp_is_active()){C_ERR();con_writeln("notepad: open Exp first with 'de'");C_NRM();goto done;}
-        if(exp_open_app(APP_NOTEPAD,NULL)<0){C_ERR();con_writeln("notepad: no free window slot");C_NRM();}
+    else if (!kstrcmp(cmd,"notepad") || !kstrcmp(cmd,"nano")) {
+        if(!use_vbe || !exp_is_active()){C_ERR();con_writeln("editor: open Exp first with 'de'");C_NRM();goto done;}
+        char edit_path[128];const char *target=NULL;
+        if(argc>=2){build_abs(argv[1],edit_path);target=edit_path;}
+        if(exp_open_app(APP_NOTEPAD,target)<0){C_ERR();con_writeln("editor: no free window slot");C_NRM();}
+        if(!kstrcmp(cmd,"nano"))con_writeln("nano: native bounded Notepad compatibility frontend, not an upstream GNU nano port.");
     }
-    else if (!kstrcmp(cmd,"gears") || !kstrcmp(cmd,"glxgears")) {
-        if(!use_vbe||!exp_is_active()){C_ERR();con_writeln("gears: open Exp first with 'de'");C_NRM();goto done;}
+    else if (!kstrcmp(cmd,"calc") || !kstrcmp(cmd,"bc")) {
+        if(!use_vbe || !exp_is_active()){C_ERR();con_writeln("calculator: open Exp first with 'de'");C_NRM();goto done;}
+        if(exp_open_app(APP_CALCULATOR,NULL)<0){C_ERR();con_writeln("calculator: no free window slot");C_NRM();}
+        if(!kstrcmp(cmd,"bc"))con_writeln("bc: native integer calculator launcher; this is not an upstream GNU bc port.");
+    }
+    else if (!kstrcmp(cmd,"cube") || !kstrcmp(cmd,"gears") || !kstrcmp(cmd,"glxgears")) {
+        if(!use_vbe||!exp_is_active()){C_ERR();con_writeln("TinyGL: open Exp first with 'de'");C_NRM();goto done;}
+        int scene=!kstrcmp(cmd,"cube")?0:1;
         if(!kstrcmp(cmd,"glxgears"))con_writeln("glxgears: GLX and Mesa APIs are unavailable; opening TinyGL-Lite software gears demo.");
-        if(exp_open_app(APP_TINYGL,NULL)<0){C_ERR();con_writeln("gears: no free desktop window");C_NRM();}
+        if(exp_open_tinygl_scene(scene)<0){C_ERR();con_writeln("TinyGL: no free desktop window");C_NRM();}
     }
     else if (!kstrcmp(cmd,"wallpaper")) {
         if(!use_vbe||!exp_is_active()){C_ERR();con_writeln("wallpaper: open Exp first with 'de'");C_NRM();goto done;}
@@ -2742,9 +2778,9 @@ void dispatch(char *line) {
         const char *grps[][2] = {
             {"Files",   "ls ll la cat view less installer-log head tail file hd hexdump wc grep sort uniq cut tr tee dd"},
             {"Edit",    "write append touch rm cp mv mkdir rmdir tree find stat chmod chown ln"},
-            {"Apps",    "de  gui open <id>  notepad  files  editor  monitor  settings  gears  glxgears  wallpaper [path]"},
-            {"Disk",    "lsblk df du mount [hda1] umount mkfs fsck [-y] hda1 sync live"},
-            {"System",  "uname info hwinfo lscpu cpucompat uptime mem free ps kill mouse dmesg date timezone which man modules"},
+            {"Apps",    "de  gui open <id>  nano [path]  notepad  calc|bc  files  editor  monitor  settings  cube  gears  glxgears  wallpaper [path]"},
+            {"Disk",    "lsblk swap df du mount [hda1] umount mkfs fsck [-y] hda1 sync live"},
+            {"System",  "uname info hwinfo lscpu cpucompat gpu uptime mem free ps kill mouse dmesg date timezone which man modules"},
             {"Network", "ifconfig netstat net test|drivers ping arp route unm connect|disconnect|status|profiles|save untui"},
             {"Users",   "users adduser deluser usermod passwd login logout sudo su whoami id"},
             {"Services","openrc rc-status rc 1|3|5 rc-service rc-update"},
@@ -2979,6 +3015,7 @@ void kernel_main(uint64_t mb_magic, uint64_t mbinfo_phys) {
      * initialise root during one-time migration on older installations. */
     const char *legacy_pin = sysconf_get("system","sudo_pin");
     if (user_init(legacy_pin) < 0) PANIC("users: cannot initialise root account");
+    if(user_current()) cprintf("Hello, %s! Use 'login' to choose an account.\n",user_current()->name);
     atminit_init();
     if (atminit_boot() < 0) PANIC("atm-init: default runlevel failed");
     /* A VBE desktop promotes the standard multi-user boot to graphical.

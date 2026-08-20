@@ -34,10 +34,10 @@
  * is persisted and can later be changed with the timezone command. ATMKoala
  * still has no RTC/NTP wall-clock source, so this is a locale preference. */
 static const char *const installer_timezones[]={
-    "UTC","Europe/London","Europe/Berlin","Europe/Moscow","Asia/Dubai",
-    "Asia/Kolkata","Asia/Bangkok","Asia/Shanghai","Asia/Tokyo",
-    "Australia/Sydney","America/Sao_Paulo","America/New_York",
-    "America/Chicago","America/Denver","America/Los_Angeles","Pacific/Auckland"
+    "UTC","Europe/London","Europe/Lisbon","Europe/Paris","Europe/Berlin","Europe/Warsaw","Europe/Kyiv","Europe/Moscow","Europe/Istanbul",
+    "Africa/Cairo","Africa/Johannesburg","Asia/Dubai","Asia/Karachi","Asia/Kolkata","Asia/Dhaka","Asia/Bangkok","Asia/Jakarta","Asia/Shanghai","Asia/Singapore","Asia/Seoul","Asia/Tokyo","Asia/Manila",
+    "Australia/Perth","Australia/Adelaide","Australia/Sydney","Pacific/Auckland","Pacific/Honolulu",
+    "America/Sao_Paulo","America/Argentina/Buenos_Aires","America/New_York","America/Toronto","America/Chicago","America/Mexico_City","America/Denver","America/Phoenix","America/Los_Angeles","America/Anchorage"
 };
 #define INSTALL_TZ_COUNT ((int)(sizeof(installer_timezones)/sizeof(installer_timezones[0])))
 #define INSTALL_LOG_CAP 2048u
@@ -160,7 +160,8 @@ static void frame(int step,int target,uint32_t start,uint32_t sectors,int tz_idx
             ksnprintf(s,sizeof(s),"Capacity: %u MiB (%u sectors)",disk_capacity_mib(target),drive_sectors(target));
             text(px+22,py+190,b,TEXT,PANEL);text(px+22,py+214,s,SUB,PANEL);
             text(px+22,py+246,preflight?preflight:"",WARN,PANEL);
-            text(px+22,py+268,"Use Left/Right or click Continue; disk discovery covers ATA PIO in this installer.",SUB,PANEL);
+            text(px+22,py+268,"Use Left/Right or Previous/Next; Continue selects the target.",SUB,PANEL);
+        button(px+22,py+300,120,"Previous",1);button(px+154,py+300,120,"Next",1);
         }
     }else if(step==2){
         char l1[128],l2[128];
@@ -170,12 +171,14 @@ static void frame(int step,int target,uint32_t start,uint32_t sectors,int tz_idx
         text(px+22,py+185,l1,TEXT,PANEL);text(px+22,py+210,l2,TEXT,PANEL);
         text(px+22,py+246,"Left/Right move start by 1 MiB. Up/Down change size by 64 MiB.",SUB,PANEL);
         text(px+22,py+268,"Home restores the full usable disk layout. Press Enter for first-boot setup.",SUB,PANEL);
+        button(px+22,py+300,100,"Start -",start>INSTALL_ALIGN_LBA);button(px+132,py+300,100,"Start +",1);button(px+242,py+300,100,"Size -",sectors>INSTALL_MIN_SECTORS);button(px+352,py+300,100,"Size +",1);
     }else if(step==3){
         char line[128],masked[65];int n=(int)kstrlen(root_password);if(n>60)n=60;for(int i=0;i<n;i++)masked[i]='*';masked[n]=0;
         text(px+22,py+154,"First-boot locale and root account",TEXT,PANEL);
         ksnprintf(line,sizeof(line),"Timezone: %s%s",installer_timezones[tz_idx],setup_field==0?"  < selected":"");text(px+22,py+184,line,setup_field==0?ACCENT:TEXT,PANEL);
         ksnprintf(line,sizeof(line),"Root password: %s%s",masked[0]?masked:"(minimum 4 characters)",setup_field==1?"  < selected":"");text(px+22,py+212,line,setup_field==1?ACCENT:TEXT,PANEL);
-        text(px+22,py+246,"Left/Right selects timezone; Tab selects password; it is never stored as clear text.",SUB,PANEL);
+        text(px+22,py+246,"Click timezone or password field; arrows select timezone; it is never stored as clear text.",SUB,PANEL);
+        button(px+22,py+292,120,"Timezone -",1);button(px+154,py+292,120,"Timezone +",1);
         text(px+22,py+268,status&&status[0]?status:"Press Enter to continue after choosing a password of at least 4 characters.",status&&status[0]?WARN:SUB,PANEL);
     }else if(step==4){
         char b[128],typed[32];
@@ -200,30 +203,34 @@ void installer_run(void){
     for(;;){
         frame(step,target,start,sectors,tz_idx,root_password,setup_field,erase_count,status,preflight,show_log);
         int k=keyboard_poll();const mouse_state_t*m=mouse_state();int click=m&&m->available&&(m->buttons&1)&&!(last_buttons&1);if(m)last_buttons=m->buttons;
+        int px=((int)vbe.width-620)/2,py=((int)vbe.height-410)/2;
         if((k=='l'||k=='L')){show_log=!show_log;continue;}
+        if(show_log&&click&&inside(m->x,m->y,px+470,py+355,126,30)){show_log=0;continue;}
         if(k==KEY_ESC&&show_log){show_log=0;continue;}
-        if(k==KEY_ESC){installer_log_add("Installer cancelled");kmemset(root_password,0,sizeof(root_password));if(buffered)vbe_double_buffer_disable();return;}
-        if(step==0&&(k=='\n'||k=='\r'||(click&&inside(m->x,m->y,(int)vbe.width/2+160,(int)vbe.height/2+150,126,30)))){step=1;continue;}
+        if(k==KEY_ESC || (click&&step<4&&inside(m->x,m->y,px+22,py+355,120,30))){installer_log_add("Installer cancelled");kmemset(root_password,0,sizeof(root_password));if(buffered)vbe_double_buffer_disable();return;}
+        if(step==0&&(k=='\n'||k=='\r'||(click&&inside(m->x,m->y,px+470,py+355,126,30)))){step=1;continue;}
         if(step==1){
-            if(k==KEY_LEFT||k==KEY_UP){target=next_drive(target,-1);layout_default(target,&start,&sectors);installer_preflight(target,preflight,sizeof(preflight));}
-            else if(k==KEY_RIGHT||k==KEY_DOWN){target=next_drive(target,1);layout_default(target,&start,&sectors);installer_preflight(target,preflight,sizeof(preflight));}
-            else if((k=='\n'||k=='\r'||(click&&inside(m->x,m->y,(int)vbe.width/2+160,(int)vbe.height/2+150,126,30)))&&target>=0){layout_default(target,&start,&sectors);step=2;}
+            if(k==KEY_LEFT||k==KEY_UP||(click&&inside(m->x,m->y,px+22,py+300,120,30))){target=next_drive(target,-1);layout_default(target,&start,&sectors);installer_preflight(target,preflight,sizeof(preflight));}
+            else if(k==KEY_RIGHT||k==KEY_DOWN||(click&&inside(m->x,m->y,px+154,py+300,120,30))){target=next_drive(target,1);layout_default(target,&start,&sectors);installer_preflight(target,preflight,sizeof(preflight));}
+            else if((k=='\n'||k=='\r'||(click&&inside(m->x,m->y,px+470,py+355,126,30)))&&target>=0){layout_default(target,&start,&sectors);step=2;}
             continue;
         }
         if(step==2){
-            if(k==KEY_LEFT&&start>INSTALL_ALIGN_LBA){start-=INSTALL_ALIGN_LBA;layout_clamp(target,&start,&sectors);}
-            else if(k==KEY_RIGHT){start+=INSTALL_ALIGN_LBA;layout_clamp(target,&start,&sectors);}
-            else if(k==KEY_UP){if(sectors<=drive_sectors(target)-start-INSTALL_SIZE_STEP_SECTORS)sectors+=INSTALL_SIZE_STEP_SECTORS;layout_clamp(target,&start,&sectors);}
-            else if(k==KEY_DOWN){if(sectors>INSTALL_MIN_SECTORS+INSTALL_SIZE_STEP_SECTORS)sectors-=INSTALL_SIZE_STEP_SECTORS;else sectors=INSTALL_MIN_SECTORS;layout_clamp(target,&start,&sectors);}
+            if((k==KEY_LEFT&&start>INSTALL_ALIGN_LBA)||(click&&inside(m->x,m->y,px+22,py+300,100,30)&&start>INSTALL_ALIGN_LBA)){start-=INSTALL_ALIGN_LBA;layout_clamp(target,&start,&sectors);}
+            else if(k==KEY_RIGHT||(click&&inside(m->x,m->y,px+132,py+300,100,30))){start+=INSTALL_ALIGN_LBA;layout_clamp(target,&start,&sectors);}
+            else if(k==KEY_UP||(click&&inside(m->x,m->y,px+352,py+300,100,30))){if(sectors<=drive_sectors(target)-start-INSTALL_SIZE_STEP_SECTORS)sectors+=INSTALL_SIZE_STEP_SECTORS;layout_clamp(target,&start,&sectors);}
+            else if(k==KEY_DOWN||(click&&inside(m->x,m->y,px+242,py+300,100,30))){if(sectors>INSTALL_MIN_SECTORS+INSTALL_SIZE_STEP_SECTORS)sectors-=INSTALL_SIZE_STEP_SECTORS;else sectors=INSTALL_MIN_SECTORS;layout_clamp(target,&start,&sectors);}
             else if(k==KEY_HOME){layout_default(target,&start,&sectors);}
-            else if((k=='\n'||k=='\r'||(click&&inside(m->x,m->y,(int)vbe.width/2+160,(int)vbe.height/2+150,126,30)))&&sectors>=INSTALL_MIN_SECTORS){setup_field=0;step=3;}
+            else if((k=='\n'||k=='\r'||(click&&inside(m->x,m->y,px+470,py+355,126,30)))&&sectors>=INSTALL_MIN_SECTORS){setup_field=0;step=3;}
             continue;
         }
         if(step==3){
             size_t plen=kstrlen(root_password);
-            if(k==KEY_TAB){setup_field^=1;status="";}
-            else if(setup_field==0&&(k==KEY_LEFT||k==KEY_UP)){tz_idx=(tz_idx+INSTALL_TZ_COUNT-1)%INSTALL_TZ_COUNT;}
-            else if(setup_field==0&&(k==KEY_RIGHT||k==KEY_DOWN)){tz_idx=(tz_idx+1)%INSTALL_TZ_COUNT;}
+            if(click&&inside(m->x,m->y,px+22,py+176,400,28)){setup_field=0;status="";}
+            else if(click&&inside(m->x,m->y,px+22,py+204,400,28)){setup_field=1;status="";}
+            else if(k==KEY_TAB){setup_field^=1;status="";}
+            else if((setup_field==0&&(k==KEY_LEFT||k==KEY_UP))||(click&&inside(m->x,m->y,px+22,py+292,120,30))){tz_idx=(tz_idx+INSTALL_TZ_COUNT-1)%INSTALL_TZ_COUNT;}
+            else if((setup_field==0&&(k==KEY_RIGHT||k==KEY_DOWN))||(click&&inside(m->x,m->y,px+154,py+292,120,30))){tz_idx=(tz_idx+1)%INSTALL_TZ_COUNT;}
             else if(setup_field==1&&k==KEY_BACKSPACE&&plen>0){root_password[plen-1]=0;}
             else if(setup_field==1&&k>=0x21&&k<0x7f&&plen+1<sizeof(root_password)){root_password[plen]=(char)k;root_password[plen+1]=0;}
             else if((k=='\n'||k=='\r')&&plen>=4){erase_count=0;status="";step=4;}
@@ -234,10 +241,10 @@ void installer_run(void){
             static const char confirm[]="ERASE";
             if(k==KEY_BACKSPACE&&erase_count>0)erase_count--;
             else if(k>0&&k<0x80&&erase_count<5){char ch=(char)k;if(ch>='a'&&ch<='z')ch-=32;if(ch==confirm[erase_count])erase_count++;else erase_count=(ch==confirm[0])?1:0;}
-            if((k=='\n'||k=='\r')&&erase_count==5){step=5;status="Writing MBR, CatFS, timezone and root account…";installer_log_add(status);frame(step,target,start,sectors,tz_idx,root_password,setup_field,erase_count,status,preflight,0);step=install_target_partition(target,start,sectors,installer_timezones[tz_idx],root_password)==0?6:7;status=step==6?"Installation completed successfully.":"Installation failed after the destructive confirmation.";if(step==7){installer_log_add(status);installer_log_save();}}
+            if((k=='\n'||k=='\r'||(click&&erase_count==5&&inside(m->x,m->y,px+470,py+355,126,30)) )&&erase_count==5){step=5;status="Writing MBR, CatFS, timezone and root account…";installer_log_add(status);frame(step,target,start,sectors,tz_idx,root_password,setup_field,erase_count,status,preflight,0);step=install_target_partition(target,start,sectors,installer_timezones[tz_idx],root_password)==0?6:7;status=step==6?"Installation completed successfully.":"Installation failed after the destructive confirmation.";if(step==7){installer_log_add(status);installer_log_save();}}
             continue;
         }
-        if(step==6||step==7){if(k=='\n'||k=='\r'||(click&&inside(m->x,m->y,(int)vbe.width/2+160,(int)vbe.height/2+150,126,30))){kmemset(root_password,0,sizeof(root_password));if(buffered)vbe_double_buffer_disable();return;}}
+        if(step==6||step==7){if(k=='\n'||k=='\r'||(click&&inside(m->x,m->y,px+470,py+355,126,30))){kmemset(root_password,0,sizeof(root_password));if(buffered)vbe_double_buffer_disable();return;}}
         __asm__ volatile("pause");
     }
 }

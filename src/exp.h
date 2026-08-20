@@ -24,6 +24,8 @@ extern int exp_ui_scale_pct;
 #define FM_MAX_ENTRIES  128
 #define FM_NAME_LEN      64
 #define SYSMON_HISTORY   60
+#define EXP_TASK_MAX     10
+#define TASK_TEXT_LEN    48
 
 /* Exp themes affect only the framebuffer desktop. VGA terminal schemes stay unchanged. */
 typedef struct {
@@ -200,12 +202,17 @@ typedef struct {
     char       calc_expr[64];
     int        calc_len, calc_result, calc_valid;
 
-    /* Tasks */
-    uint8_t    todo_done[5];
-    int        todo_sel;
+    /* Tasks: per-window bounded local checklist with inline creation. */
+    uint8_t    todo_done[EXP_TASK_MAX];
+    char       todo_text[EXP_TASK_MAX][TASK_TEXT_LEN];
+    char       todo_input[TASK_TEXT_LEN];
+    int        todo_sel, todo_count, todo_edit, todo_input_len;
 
     /* Calendar is manual because ATMKoala has no RTC/NTP wall-clock yet. */
     int        cal_year, cal_month;
+
+    /* TinyGL-Lite scene: 0=cube, 1=gears; both remain software-only. */
+    int        tinygl_scene;
 
     /* Native GUI games */
     exp_mines_t mines;
@@ -236,6 +243,7 @@ typedef struct {
 void exp_init(void);
 void exp_run(void);
 int  exp_open_app(app_id_t app, const char *path);
+int  exp_open_tinygl_scene(int scene);
 /* Active Exp session wallpaper controls. `apply` decodes once and persists the
  * image path; Viewer key A uses the same internal path. */
 int  exp_wallpaper_apply(const char *path);

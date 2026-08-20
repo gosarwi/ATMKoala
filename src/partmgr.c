@@ -123,6 +123,7 @@ const char *part_type_name(uint8_t type) {
         case PART_TYPE_EMPTY: return "empty";
         case PART_TYPE_FAT32: return "FAT32";
         case PART_TYPE_LINUX: return "Linux";
+        case PART_TYPE_LINUX_SWAP: return "Linux-swap";
         case PART_TYPE_CATFS: return "CatFS";
         default:              return "unknown";
     }

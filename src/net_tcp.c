@@ -174,7 +174,7 @@ int atm_tcp_selftest(void){
     ip4_hdr_t *ip=(ip4_hdr_t*)(frame+ETH_HLEN);ip->ver_ihl=0x45;ip->ttl=64;ip->protocol=IP_PROTO_TCP;ip->total_len=net_bswap16(20+sizeof(tcp_hdr_t));ip->checksum=net_ip_checksum(ip,20);
     tcp_hdr_t *t=(tcp_hdr_t*)(frame+ETH_HLEN+20);t->src_port=net_bswap16(1000);t->dst_port=net_bswap16(2000);t->seq=net_bswap32(1);t->data_off=0x50;t->flags=TCP_ACK;t->window=net_bswap16(64);t->checksum=tcp_checksum(ip,t,sizeof(*t));
     if(tcp_validate_frame(frame,sizeof(frame),0,0,0,0)<0)return -1;frame[ETH_HLEN+10]^=1;if(tcp_validate_frame(frame,sizeof(frame),0,0,0,0)==0)return -1;
-    atm_tcp_conn_t c;kmemset(&c,0,sizeof(c));c.peer_window=8;if(!tcp_window_allows(&c,8)||tcp_window_allows(&c,9)||tcp_window_allows(&c,0))return -1;return 0;
+    atm_tcp_conn_t c;kmemset(&c,0,sizeof(c));tcp_congestion_init(&c);c.peer_window=8;if(!tcp_window_allows(&c,8)||tcp_window_allows(&c,9)||tcp_window_allows(&c,0))return -1;return 0;
 }
 
 int atm_tcp_close(atm_tcp_conn_t *c){

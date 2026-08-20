@@ -735,8 +735,27 @@ static void draw_files(exp_win_t *w){
     }
     HL(cx,cy+ch-16,cw2,C_SURFACE0);
     R(cx,cy+ch-15,cw2,15,C_MANTLE);
-    T(cx+4,cy+ch-14,"Enter=open  Bksp=up  PgUp/Dn=scroll",C_SUBTEXT,C_MANTLE);
+    T(cx+4,cy+ch-14,"Enter=open  T=trash  R=trash view  Bksp=up  PgUp/Dn=scroll",C_SUBTEXT,C_MANTLE);
 }
+
+static int fm_selected_path(exp_win_t *w,char out[128]){
+    if(!w||!out||w->fm_sel<0||w->fm_sel>=w->fm_count)return -1;
+    fm_entry_t *e=&w->fm_ent[w->fm_sel];if(!e->name[0]||!kstrcmp(e->name,".."))return -1;
+    kstrcpy(out,w->fm_path);if(out[kstrlen(out)-1]!='/')kstrcat(out,"/");kstrcat(out,e->name);size_t n=kstrlen(out);if(n>1&&out[n-1]=='/')out[n-1]=0;return 0;
+}
+static void fm_trash_selected(exp_win_t *w){
+    char src[128],dst[128],name[FM_NAME_LEN],suffix[16];
+    if(!catfs_vfs_is_mounted()){exp_notify("Trash needs mounted CatFS /data",C_RED);return;}
+    if(fm_selected_path(w,src)<0){exp_notify("Select a file or folder to trash",C_RED);return;}
+    if(kstrncmp(src,"/data/",6)||!kstrncmp(src,"/data/uiu/Trash",15)){exp_notify("Trash moves only CatFS /data items",C_RED);return;}
+    kstrcpy(name,w->fm_ent[w->fm_sel].name);int nl=(int)kstrlen(name);if(nl&&name[nl-1]=='/')name[nl-1]=0;
+    (void)vfs_mkdir("/data/uiu",0755);(void)vfs_mkdir("/data/uiu/Trash",0700);
+    kstrcpy(dst,"/data/uiu/Trash/");kstrcat(dst,name);vfs_stat_t st;
+    if(vfs_stat(dst,&st)==0){kuitoa(pit_get_ticks(),suffix,10);if(kstrlen(dst)+1+kstrlen(suffix)>=sizeof(dst)){exp_notify("Trash name too long",C_RED);return;}kstrcat(dst,"-");kstrcat(dst,suffix);}
+    if(vfs_rename(src,dst)<0){exp_notify("Trash move denied or failed",C_RED);return;}
+    exp_notify("Moved to CatFS Trash",C_GREEN);w->fm_sel=0;w->fm_scroll=0;fm_load(w);
+}
+static void fm_open_trash(exp_win_t *w){if(!catfs_vfs_is_mounted()){exp_notify("Trash needs mounted CatFS /data",C_RED);return;}(void)vfs_mkdir("/data/uiu",0755);(void)vfs_mkdir("/data/uiu/Trash",0700);kstrcpy(w->fm_path,"/data/uiu/Trash");w->fm_sel=0;w->fm_scroll=0;fm_load(w);}
 
 static void fm_key(exp_win_t *w, int k){
     int mr=CH(w)/17;
@@ -788,6 +807,8 @@ static void fm_key(exp_win_t *w, int k){
             else exp_open_app(APP_VIEWER,fp);
         }
     }
+    if(k=='t'||k=='T'){fm_trash_selected(w);return;}
+    if(k=='r'||k=='R'){fm_open_trash(w);return;}
     if(k=='\b'){
         char *last=w->fm_path, *p=w->fm_path;
         while(*p){if(*p=='/')last=p;p++;}
@@ -914,24 +935,17 @@ static void draw_sysmon(exp_win_t *w){
 }
 
 /* ─── Calculator / Tasks ─────────────────────────────────── */
-static void calc_eval(exp_win_t *w){
-    int a=0,b=0,neg=0,i=0; char op=0;
-    if(w->calc_expr[0]=='-'){neg=1;i++;}
-    while(w->calc_expr[i]>='0'&&w->calc_expr[i]<='9') a=a*10+(w->calc_expr[i++]-'0');
-    if(neg)a=-a; op=w->calc_expr[i++];
-    if(!op){w->calc_result=a;w->calc_valid=1;return;}
-    neg=0;if(w->calc_expr[i]=='-'){neg=1;i++;}
-    int b_digits=0;
-    while(w->calc_expr[i]>='0'&&w->calc_expr[i]<='9'){b=b*10+(w->calc_expr[i++]-'0');b_digits++;}
-    if(neg)b=-b;
-    if(!b_digits || w->calc_expr[i]){w->calc_valid=0;return;}
-    if(op=='+')w->calc_result=a+b;
-    else if(op=='-')w->calc_result=a-b;
-    else if(op=='*')w->calc_result=a*b;
-    else if(op=='/'&&b)w->calc_result=a/b;
-    else {w->calc_valid=0;return;}
-    w->calc_valid=1;
+static const char *calc_p;
+static int calc_expr_parse(int *out);
+static void calc_ws(void){while(*calc_p==' ')calc_p++;}
+static int calc_factor(int *out){
+    calc_ws();int sign=1;if(*calc_p=='+'||*calc_p=='-'){if(*calc_p=='-')sign=-1;calc_p++;}
+    calc_ws();if(*calc_p=='('){calc_p++;if(calc_expr_parse(out)<0||*calc_p!=')')return -1;calc_p++;*out*=sign;return 0;}
+    if(*calc_p<'0'||*calc_p>'9')return -1;int v=0;while(*calc_p>='0'&&*calc_p<='9'){v=v*10+(*calc_p-'0');calc_p++;}*out=v*sign;return 0;
 }
+static int calc_term_parse(int *out){int v;if(calc_factor(&v)<0)return -1;for(;;){calc_ws();char op=*calc_p;if(op!='*'&&op!='/'&&op!='%')break;calc_p++;int rhs;if(calc_factor(&rhs)<0||(op=='/'||op=='%')&&rhs==0)return -1;if(op=='*')v*=rhs;else if(op=='/')v/=rhs;else v%=rhs;}*out=v;return 0;}
+static int calc_expr_parse(int *out){int v;if(calc_term_parse(&v)<0)return -1;for(;;){calc_ws();char op=*calc_p;if(op!='+'&&op!='-')break;calc_p++;int rhs;if(calc_term_parse(&rhs)<0)return -1;if(op=='+')v+=rhs;else v-=rhs;}*out=v;return 0;}
+static void calc_eval(exp_win_t *w){calc_p=w->calc_expr;int v;if(calc_expr_parse(&v)<0){w->calc_valid=0;return;}calc_ws();if(*calc_p){w->calc_valid=0;return;}w->calc_result=v;w->calc_valid=1;}
 static void draw_calculator(exp_win_t *w){
     int cx=CX(w),cy=CY(w),cw2=CW(w),ch=CH(w);
     R(cx,cy,cw2,ch,C_BASE);
@@ -947,43 +961,46 @@ static void draw_calculator(exp_win_t *w){
         R(x,y,bw,26,C_MANTLE); BOX(x,y,bw,26,C_SURFACE1);
         T(x+bw/2-4,y+5,keys[i],C_TEXT,C_MANTLE);
     }
-    T(cx+10,cy+ch-20,"Type an expression: 12*4  Enter evaluates  C clears",C_SUBTEXT,C_BASE);
+    T(cx+10,cy+ch-20,"Integer: + - * / % ( ) | precedence | Enter evaluates | C clears",C_SUBTEXT,C_BASE);
 }
 static void calc_key(exp_win_t *w,int k){
     if(k=='\n'||k=='\r'){calc_eval(w);return;}
     if(k=='\b'||k==127){if(w->calc_len>0)w->calc_expr[--w->calc_len]=0;return;}
     if(k=='c'||k=='C'){w->calc_len=0;w->calc_expr[0]=0;w->calc_valid=0;return;}
-    if((k>='0'&&k<='9')||k=='+'||k=='-'||k=='*'||k=='/')
+    if((k>='0'&&k<='9')||k=='+'||k=='-'||k=='*'||k=='/'||k=='%'||k=='('||k==')'||k==' ')
         if(w->calc_len<(int)sizeof(w->calc_expr)-1){w->calc_expr[w->calc_len++]=(char)k;w->calc_expr[w->calc_len]=0;w->calc_valid=0;}
 }
-static const char *todo_text[5]={"Review system status","Write a note","Back up CatFS data","Check open services","Plan next POSIX step"};
+static void tasks_init(exp_win_t *w){
+    static const char *const seed[]={"Review system status","Write a note","Back up CatFS data","Check open services","Plan next POSIX step"};
+    w->todo_count=5;w->todo_sel=0;w->todo_edit=0;w->todo_input_len=0;w->todo_input[0]=0;kmemset(w->todo_done,0,sizeof(w->todo_done));
+    for(int i=0;i<w->todo_count;i++)kstrncpy(w->todo_text[i],seed[i],TASK_TEXT_LEN-1);
+}
 static void draw_tasks(exp_win_t *w){
-    int cx=CX(w),cy=CY(w),cw2=CW(w),ch=CH(w);
-    R(cx,cy,cw2,ch,C_BASE);
-    T(cx+10,cy+10,"TASKS",C_SUBTEXT,C_BASE);
-    T(cx+10,cy+30,"Personal local checklist",C_OVERLAY0,C_BASE);
-    for(int i=0;i<5;i++){
-        int y=cy+58+i*34; int sel=i==w->todo_sel; color32_t bg=sel?C_SURFACE1:C_MANTLE;
-        R(cx+10,y,cw2-20,28,bg); if(sel)BOX(cx+10,y,cw2-20,28,C_TEXT);
-        BOX(cx+18,y+8,12,12,w->todo_done[i]?C_TEXT:C_SUBTEXT);
-        if(w->todo_done[i]){R(cx+21,y+11,6,6,C_TEXT);}
-        T(cx+42,y+6,todo_text[i],w->todo_done[i]?C_SUBTEXT:C_TEXT,bg);
-    }
-    T(cx+10,cy+ch-20,"Up/Down select  Space or Enter toggles",C_SUBTEXT,C_BASE);
+    int cx=CX(w),cy=CY(w),cw2=CW(w),ch=CH(w);R(cx,cy,cw2,ch,C_BASE);T(cx+10,cy+10,"TASKS",C_SUBTEXT,C_BASE);T(cx+10,cy+30,"Bounded local checklist",C_OVERLAY0,C_BASE);
+    int rows=w->todo_count;if(rows>TASK_MAX)rows=TASK_MAX;
+    for(int i=0;i<rows;i++){int y=cy+52+i*28;int sel=i==w->todo_sel;color32_t bg=sel?C_SURFACE1:C_MANTLE;R(cx+10,y,cw2-20,24,bg);if(sel)BOX(cx+10,y,cw2-20,24,C_TEXT);BOX(cx+18,y+6,12,12,w->todo_done[i]?C_TEXT:C_SUBTEXT);if(w->todo_done[i])R(cx+21,y+9,6,6,C_TEXT);T(cx+42,y+4,w->todo_text[i],w->todo_done[i]?C_SUBTEXT:C_TEXT,bg);}
+    int iy=cy+52+rows*28+6;R(cx+10,iy,cw2-20,26,w->todo_edit?C_SURFACE1:C_MANTLE);if(w->todo_edit)BOX(cx+10,iy,cw2-20,26,C_BLUE);T(cx+18,iy+5,w->todo_edit?(w->todo_input[0]?w->todo_input:"Type task; Enter adds; Esc cancels"):"A: add task  D: remove selected",w->todo_edit?C_TEXT:C_SUBTEXT,w->todo_edit?C_SURFACE1:C_MANTLE);
+    T(cx+10,cy+ch-20,"Up/Down select  Space toggles  A add  D remove",C_SUBTEXT,C_BASE);
 }
 static void tasks_key(exp_win_t *w,int k){
-    if(k==KEY_UP&&w->todo_sel>0)w->todo_sel--;
-    else if(k==KEY_DOWN&&w->todo_sel<4)w->todo_sel++;
-    else if(k==' '||k=='\n'||k=='\r')w->todo_done[w->todo_sel]^=1;
+    if(w->todo_edit){if(k==KEY_ESC){w->todo_edit=0;w->todo_input_len=0;w->todo_input[0]=0;}else if((k=='\n'||k=='\r')&&w->todo_input_len>0&&w->todo_count<TASK_MAX){kstrcpy(w->todo_text[w->todo_count],w->todo_input);w->todo_done[w->todo_count]=0;w->todo_sel=w->todo_count++;w->todo_edit=0;w->todo_input_len=0;w->todo_input[0]=0;}else if((k=='\b'||k==127)&&w->todo_input_len>0){w->todo_input[--w->todo_input_len]=0;}else if(k>=0x20&&k<=0x7e&&w->todo_input_len<TASK_TEXT_LEN-1){w->todo_input[w->todo_input_len++]=(char)k;w->todo_input[w->todo_input_len]=0;}return;}
+    if((k=='a'||k=='A')&&w->todo_count<TASK_MAX){w->todo_edit=1;w->todo_input_len=0;w->todo_input[0]=0;}
+    else if((k=='d'||k=='D')&&w->todo_count>0){for(int i=w->todo_sel;i+1<w->todo_count;i++){kstrcpy(w->todo_text[i],w->todo_text[i+1]);w->todo_done[i]=w->todo_done[i+1];}w->todo_count--;if(w->todo_sel>=w->todo_count&&w->todo_count>0)w->todo_sel=w->todo_count-1;}
+    else if(k==KEY_UP&&w->todo_sel>0)w->todo_sel--;
+    else if(k==KEY_DOWN&&w->todo_sel<w->todo_count-1)w->todo_sel++;
+    else if((k==' '||k=='\n'||k=='\r')&&w->todo_count>0)w->todo_done[w->todo_sel]^=1;
 }
 static void draw_tinygl_app(exp_win_t *w){
-    int cx=CX(w),cy=CY(w),cw2=CW(w),ch=CH(w);
-    T(cx+10,cy+8,"TinyGL-Lite Gears",C_LAVENDER,C_BASE);
-    T(cx+10,cy+24,"fixed-point software raster demo | no GLX / Mesa API",C_SUBTEXT,C_BASE);
+    int cx=CX(w),cy=CY(w),cw2=CW(w),ch=CH(w),angle=(int)(pit_get_ticks()*7);
+    const char *name=w->tinygl_scene?"Gears":"Cube";
+    T(cx+10,cy+8,"TinyGL-Lite Software Scene",C_LAVENDER,C_BASE);
+    TF(cx+10,cy+24,C_SUBTEXT,C_BASE,"%s | C cube | G gears | no GLX / Mesa API",name);
     int vh=ch-52;if(vh<64)vh=64;
-    tgl_draw_gears(&tinygl_ctx,cx+10,cy+42,cw2-20,vh,(int)(pit_get_ticks()*7));
-    T(cx+12,cy+46,"software gears scene",C_TEXT,RGB(0x10,0x10,0x10));
+    if(w->tinygl_scene)tgl_draw_gears(&tinygl_ctx,cx+10,cy+42,cw2-20,vh,angle);
+    else tgl_draw_cube(&tinygl_ctx,cx+10,cy+42,cw2-20,vh,angle);
+    T(cx+12,cy+46,w->tinygl_scene?"software gears scene":"software rotating cube",C_TEXT,RGB(0x10,0x10,0x10));
 }
+static void tinygl_key(exp_win_t *w,int k){if(k=='c'||k=='C'){w->tinygl_scene=0;kstrcpy(w->title,"TinyGL Cube (software)");}else if(k=='g'||k=='G'){w->tinygl_scene=1;kstrcpy(w->title,"TinyGL Gears (software)");}}
 /* ─── Native GUI games ───────────────────────────────────── */
 static uint32_t gui_rng_state=0x6D2B79F5u;
 static uint32_t gui_rand(void){gui_rng_state^=gui_rng_state<<13;gui_rng_state^=gui_rng_state>>17;gui_rng_state^=gui_rng_state<<5;return gui_rng_state;}
@@ -1412,7 +1429,7 @@ int exp_open_app(app_id_t app, const char *path){
         break;
     case APP_NOTEPAD:
         kstrcpy(w->title,"Notepad");
-        kstrcpy(w->ed_path,"/data/notepad.txt");
+        kstrcpy(w->ed_path,(path&&path[0])?path:"/data/notepad.txt");
         w->ed_dirty=0; notepad_load(w);
         break;
     case APP_VIEWER:
@@ -1441,7 +1458,7 @@ int exp_open_app(app_id_t app, const char *path){
         w->w=360; w->h=330; w->calc_expr[0]=0; w->calc_valid=0; break;
     case APP_TASKS:
         kstrcpy(w->title,"Tasks");
-        w->w=430; w->h=310; w->todo_sel=0; break;
+        w->w=460; w->h=420; tasks_init(w); break;
     case APP_JOURNAL:
         kstrcpy(w->title,"Journal");
         kstrcpy(w->ed_path,"/data/journal.txt");
@@ -1453,8 +1470,8 @@ int exp_open_app(app_id_t app, const char *path){
         kstrcpy(w->title,"Calendar (manual)");
         w->cal_year=2026;w->cal_month=1;w->w=390;w->h=300;break;
     case APP_TINYGL:
-        kstrcpy(w->title,"TinyGL Gears (software)");
-        w->w=520; w->h=400; break;
+        kstrcpy(w->title,"TinyGL Cube (software)");
+        w->tinygl_scene=0;w->w=520;w->h=400;break;
     case APP_MINES:
         kstrcpy(w->title,"Minesweeper");
         w->w=360; w->h=390; mines_init(w); break;
@@ -1479,6 +1496,10 @@ int exp_open_app(app_id_t app, const char *path){
     DE.win_count++;
     exp_notify(w->title,C_BLUE);
     return w->id;
+}
+int exp_open_tinygl_scene(int scene){
+    int id=exp_open_app(APP_TINYGL,NULL);if(id<0)return -1;
+    exp_win_t *w=&DE.wins[DE.active];w->tinygl_scene=scene?1:0;kstrcpy(w->title,w->tinygl_scene?"TinyGL Gears (software)":"TinyGL Cube (software)");return id;
 }
 
 int exp_gui_open(const char *id){
@@ -1781,6 +1802,7 @@ void exp_run(void){
             case APP_CALENDAR: calendar_key(w,k); break;
             case APP_MINES:    mines_key(w,k); break;
             case APP_SNAKE:    snake_key(w,k); break;
+            case APP_TINYGL:   tinygl_key(w,k); break;
             case APP_IMAGE_VIEWER: image_viewer_key(w,k); break;
             case APP_EXTERNAL:
                 if(w->ext_slot>=0&&w->ext_slot<gui_app_count&&gui_apps[w->ext_slot].key){exp_gui_context_t ctx;gui_context(&ctx,w);gui_apps[w->ext_slot].key(&ctx,k,ctrl2,alt2);}break;

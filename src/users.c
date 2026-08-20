@@ -223,19 +223,22 @@ static void initialise_account(user_account_t *u, const char *name, user_role_t 
 }
 
 int user_init(const char *legacy_pin) {
+    /* Existing users.conf always wins. New development images intentionally use
+     * the documented bootstrap password only until the owner changes it. */
+    (void)legacy_pin;
     kmemset(g_users,0,sizeof(g_users)); g_user_count=0; g_current=-1;
     /* Config core keeps a RAMFS-compatible default.  Prefer the CatFS copy
      * whenever /data is mounted so account changes survive reboot. */
     if (catfs_vfs_is_mounted()) (void)cfg_load(&g_usercfg,user_cfg_path());
     for (int i=0; i<g_usercfg.count; i++) if (kstrcmp(g_usercfg.sections[i].name,"meta")) add_loaded(&g_usercfg.sections[i]);
     if (index_of("root")<0 && g_user_count<USER_MAX) {
-        initialise_account(&g_users[g_user_count++],"root",ROLE_ADMIN,legacy_pin&&legacy_pin[0]?legacy_pin:"1234",USER_UID_ROOT);
+        initialise_account(&g_users[g_user_count++],"root",ROLE_ADMIN,"atmkoala",USER_UID_ROOT);
     }
     if (index_of("user")<0 && g_user_count<USER_MAX) {
-        initialise_account(&g_users[g_user_count++],"user",ROLE_USER,"user",USER_UID_FIRST);
+        initialise_account(&g_users[g_user_count++],"user",ROLE_USER,"atmkoala",USER_UID_FIRST);
     }
     if (index_of("guest")<0 && g_user_count<USER_MAX) {
-        initialise_account(&g_users[g_user_count++],"guest",ROLE_GUEST,"guest",USER_UID_GUEST);
+        initialise_account(&g_users[g_user_count++],"guest",ROLE_GUEST,"atmkoala",USER_UID_GUEST);
     }
     user_save();
     int root=index_of("root");
