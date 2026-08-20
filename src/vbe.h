@@ -76,6 +76,9 @@ void vbe_draw_hline(int x, int y, int len, color32_t c);
 void vbe_draw_vline(int x, int y, int len, color32_t c);
 void vbe_draw_rect(int x, int y, int w, int h, color32_t c);
 void vbe_clear(color32_t c);
+/* Nearest-neighbour RGBA blit to the active draw surface (backbuffer when
+ * enabled). Used for cached desktop wallpapers; source pixels are RGBA. */
+void vbe_blit_rgba_scaled(const uint8_t *rgba,int src_w,int src_h,int dst_x,int dst_y,int dst_w,int dst_h);
 
 /* Font rendering (8x16 bitmap font) */
 void vbe_putchar(int x, int y, char c, color32_t fg, color32_t bg);

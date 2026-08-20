@@ -127,3 +127,17 @@ const char *part_type_name(uint8_t type) {
         default:              return "unknown";
     }
 }
+
+const char *mbr_probe_filesystem(int drive,const mbr_entry_t *entry){
+    uint8_t sec[SECTOR_SIZE];
+    if(!entry || entry->type==PART_TYPE_EMPTY || !entry->sector_count) return "empty";
+    if(drive<0 || drive>=DISK_MAX_DRIVES || !disk_drives[drive].present) return "unreadable";
+    if((uint64_t)entry->lba_start+(uint64_t)entry->sector_count>(uint64_t)disk_drives[drive].sectors) return "invalid-range";
+    if(disk_read_sector(drive,entry->lba_start,sec)<0) return "unreadable";
+    uint32_t magic=(uint32_t)sec[0]|((uint32_t)sec[1]<<8)|((uint32_t)sec[2]<<16)|((uint32_t)sec[3]<<24);
+    if(magic==0xCAFE4002u) return "CatFS";
+    /* The ext2 superblock begins 1024 bytes from the partition start and its
+     * little-endian s_magic is at byte 56 inside that superblock. */
+    if(entry->sector_count>2 && disk_read_sector(drive,entry->lba_start+2,sec)==0 && sec[56]==0x53 && sec[57]==0xEF) return "ext2";
+    return "unknown";
+}

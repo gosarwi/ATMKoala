@@ -83,5 +83,8 @@ int  mbr_overlaps(const mbr_table_t *tbl, uint32_t lba_start,
 
 /* Human-readable name for a partition type byte */
 const char *part_type_name(uint8_t type);
+/* Non-destructive signature probe for one valid primary MBR partition.
+ * Returns a stable label: ext2, CatFS, unknown or unreadable. */
+const char *mbr_probe_filesystem(int drive,const mbr_entry_t *entry);
 
 #endif /* PARTMGR_H */

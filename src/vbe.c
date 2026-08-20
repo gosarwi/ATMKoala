@@ -33,7 +33,7 @@ int vbe_double_buffer_enable(void) {
         vbe_backbuffer_size=bytes;
     }
     uint8_t *front=(uint8_t *)vbe.fb;
-    for (uint32_t i=0;i<bytes;i++) vbe_backbuffer[i]=front[i];
+    kmemcpy(vbe_backbuffer,front,bytes);
     vbe_buffered=1;
     return 0;
 }
@@ -42,7 +42,7 @@ void vbe_present(void) {
     if (!vbe.active || !vbe_buffered || !vbe_backbuffer) return;
     uint32_t bytes=vbe.pitch*vbe.height;
     uint8_t *front=(uint8_t *)vbe.fb;
-    for (uint32_t i=0;i<bytes;i++) front[i]=vbe_backbuffer[i];
+    kmemcpy(front,vbe_backbuffer,bytes);
 }
 
 void vbe_double_buffer_disable(void) {
@@ -198,10 +198,48 @@ void vbe_putpixel(int x, int y, color32_t c) {
 }
 
 void vbe_fill_rect(int x, int y, int w, int h, color32_t c) {
-    if (!vbe.active) return;
-    for (int row = y; row < y + h; row++)
-        for (int col = x; col < x + w; col++)
-            vbe_putpixel(col, row, c);
+    if(!vbe.active||w<=0||h<=0)return;
+    if(x<0){w+=x;x=0;} if(y<0){h+=y;y=0;}
+    if(x>=(int)vbe.width||y>=(int)vbe.height||w<=0||h<=0)return;
+    if(w>(int)vbe.width-x)w=(int)vbe.width-x;
+    if(h>(int)vbe.height-y)h=(int)vbe.height-y;
+    uint8_t *base=vbe_draw_base();
+    if(vbe.bpp==32){
+        for(int row=0;row<h;row++){
+            uint32_t *p=(uint32_t *)(base+(uint32_t)(y+row)*vbe.pitch)+(uint32_t)x;
+            int col=0;for(;col+3<w;col+=4){p[col]=c;p[col+1]=c;p[col+2]=c;p[col+3]=c;}for(;col<w;col++)p[col]=c;
+        }
+    }else{
+        uint8_t b=(uint8_t)c,g=(uint8_t)(c>>8),r=(uint8_t)(c>>16);
+        for(int row=0;row<h;row++){uint8_t *p=base+(uint32_t)(y+row)*vbe.pitch+(uint32_t)x*3u;for(int col=0;col<w;col++){p[0]=b;p[1]=g;p[2]=r;p+=3;}}
+    }
+}
+
+void vbe_blit_rgba_scaled(const uint8_t *rgba,int src_w,int src_h,int dst_x,int dst_y,int dst_w,int dst_h){
+    if(!vbe.active||!rgba||src_w<=0||src_h<=0||dst_w<=0||dst_h<=0)return;
+    int clip_l=dst_x<0?-dst_x:0,clip_t=dst_y<0?-dst_y:0;
+    int clip_r=dst_x+dst_w>(int)vbe.width?(int)vbe.width-dst_x:dst_w;
+    int clip_b=dst_y+dst_h>(int)vbe.height?(int)vbe.height-dst_y:dst_h;
+    if(clip_l>=clip_r||clip_t>=clip_b)return;
+    uint8_t *base=vbe_draw_base();
+    for(int dy=clip_t;dy<clip_b;dy++){
+        int sy=(int)((uint64_t)dy*(uint64_t)src_h/(uint64_t)dst_h);
+        const uint8_t *srow=rgba+((uint32_t)sy*(uint32_t)src_w*4u);
+        uint8_t *drow=base+(uint32_t)(dst_y+dy)*vbe.pitch;
+        for(int dx=clip_l;dx<clip_r;dx++){
+            int sx=(int)((uint64_t)dx*(uint64_t)src_w/(uint64_t)dst_w);
+            const uint8_t *sp=srow+(uint32_t)sx*4u;uint8_t a=sp[3];
+            if(vbe.bpp==32){
+                uint32_t *dp=((uint32_t *)drow)+(uint32_t)(dst_x+dx);uint32_t old=*dp;
+                if(a==255)*dp=RGB(sp[0],sp[1],sp[2]);
+                else if(a){uint32_t inv=255u-a;*dp=RGB(((uint32_t)sp[0]*a+((old>>16)&255u)*inv)/255u,((uint32_t)sp[1]*a+((old>>8)&255u)*inv)/255u,((uint32_t)sp[2]*a+(old&255u)*inv)/255u);}
+            }else{
+                uint8_t *dp=drow+(uint32_t)(dst_x+dx)*3u;
+                if(a==255){dp[0]=sp[2];dp[1]=sp[1];dp[2]=sp[0];}
+                else if(a){uint32_t inv=255u-a;dp[0]=(uint8_t)(((uint32_t)sp[2]*a+(uint32_t)dp[0]*inv)/255u);dp[1]=(uint8_t)(((uint32_t)sp[1]*a+(uint32_t)dp[1]*inv)/255u);dp[2]=(uint8_t)(((uint32_t)sp[0]*a+(uint32_t)dp[2]*inv)/255u);}
+            }
+        }
+    }
 }
 
 void vbe_draw_hline(int x, int y, int len, color32_t c) {

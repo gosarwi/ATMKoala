@@ -222,12 +222,21 @@ typedef struct {
     exp_notif_t notifs[DE_NOTIF_MAX];
     uint32_t   clock_sec;
     uint32_t   last_clock;
+    /* Desktop-owned image cache. Decoded once on apply/startup and never
+     * shared with Viewer windows, so window close cannot invalidate it. */
+    atm_image_t wallpaper_image;
+    char       wallpaper_path[128];
+    int        wallpaper_file_active;
 } exp_state_t;
 
 /* Public API */
 void exp_init(void);
 void exp_run(void);
 int  exp_open_app(app_id_t app, const char *path);
+/* Active Exp session wallpaper controls. `apply` decodes once and persists the
+ * image path; Viewer key A uses the same internal path. */
+int  exp_wallpaper_apply(const char *path);
+const char *exp_wallpaper_current(void);
 void exp_notify(const char *msg, color32_t color);
 void exp_capture_char(char c);  /* called by vbe_console_putchar */
 int  exp_is_active(void);        /* true while Exp owns framebuffer output */

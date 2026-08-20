@@ -274,8 +274,35 @@ static const char *wallpaper_name(int id){
     static const char *names[]={"Paper","Porcelain","Grid","Lines"};
     return names[(id>=0&&id<4)?id:0];
 }
+static void wallpaper_file_clear(int save){
+    atm_image_release(&DE.wallpaper_image);DE.wallpaper_path[0]=0;DE.wallpaper_file_active=0;
+    if(save){sysconf_set("desktop","wallpaper_file","");sysconf_save();}
+}
+static int wallpaper_file_set(const char *path,int save){
+    atm_image_t decoded;
+    if(!path||!path[0]||kstrlen(path)>=sizeof(DE.wallpaper_path))return -1;
+    if(atm_image_decode_file(path,&decoded)<0)return -1;
+    wallpaper_file_clear(0);DE.wallpaper_image=decoded;kstrcpy(DE.wallpaper_path,path);DE.wallpaper_file_active=1;
+    if(save){sysconf_set("desktop","wallpaper_file",path);sysconf_save();}
+    return 0;
+}
+static const char *wallpaper_label(void){return DE.wallpaper_file_active?DE.wallpaper_path:wallpaper_name(wallpaper_id);}
+int exp_wallpaper_apply(const char *path){
+    if(!DE.running||wallpaper_file_set(path,1)<0)return -1;
+    exp_notify("Image wallpaper applied",C_GREEN);exp_force_redraw=1;return 0;
+}
+const char *exp_wallpaper_current(void){return wallpaper_label();}
 static void draw_wallpaper(void){
     int usable=DE_SCR_H-DE_TASKBAR_H;
+    if(DE.wallpaper_file_active&&DE.wallpaper_image.rgba&&DE.wallpaper_image.width>0&&DE.wallpaper_image.height>0){
+        /* Cover the usable desktop while preserving aspect ratio. The source
+         * was decoded at apply/startup, so this is only a bounded scaled blit. */
+        int dw=DE_SCR_W,dh=(DE.wallpaper_image.height*dw)/DE.wallpaper_image.width;
+        if(dh<usable){dh=usable;dw=(DE.wallpaper_image.width*dh)/DE.wallpaper_image.height;}
+        vbe_fill_rect(0,0,DE_SCR_W,usable,C_BASE);
+        vbe_blit_rgba_scaled(DE.wallpaper_image.rgba,DE.wallpaper_image.width,DE.wallpaper_image.height,(DE_SCR_W-dw)/2,(usable-dh)/2,dw,dh);
+        return;
+    }
     for(int py=0;py<usable;py++){
         uint8_t shade;
         if(exp_theme==EXP_THEME_DARK){
@@ -810,7 +837,7 @@ static void image_viewer_load(exp_win_t *w,const char *path){
 static void draw_image_viewer(exp_win_t *w){
     int cx=CX(w),cy=CY(w),cw2=CW(w),ch=CH(w);R(cx,cy,cw2,ch,C_BASE);R(cx,cy,cw2,23,C_MANTLE);
     T(cx+8,cy+5,w->image_path[0]?w->image_path:"No image",C_TEXT,C_MANTLE);
-    if(!w->image.rgba){T(cx+12,cy+44,"Image preview unavailable",C_RED,C_BASE);T(cx+12,cy+64,w->image.error[0]?w->image.error:"Select a PNG or JPEG file in Files.",C_SUBTEXT,C_BASE);return;}
+    if(!w->image.rgba){T(cx+12,cy+44,"Image preview unavailable",C_RED,C_BASE);T(cx+12,cy+64,w->image.error[0]?w->image.error:"Select a PNG, JPEG or BMP file in Files.",C_SUBTEXT,C_BASE);return;}
     int vx=EXP_SCALE(cx+8),vy=EXP_SCALE(cy+30),vw=EXP_SCALE(cw2-16),vh=EXP_SCALE(ch-58);if(vw<1||vh<1)return;
     for(int yy=0;yy<vh;yy+=8)for(int xx=0;xx<vw;xx+=8)vbe_fill_rect(vx+xx,vy+yy,(xx+8<vw)?8:vw-xx,(yy+8<vh)?8:vh-yy,((xx/8+yy/8)&1)?RGB(0x31,0x31,0x31):RGB(0x22,0x22,0x22));
     /* image_zoom is a percentage of the proportional fit (0 = fit), rather
@@ -825,9 +852,18 @@ static void draw_image_viewer(exp_win_t *w){
     int x0=ox<vx?vx:ox,y0=oy<vy?vy:oy;
     int x1=ox+dw>vx+vw?vx+vw:ox+dw,y1=oy+dh>vy+vh?vy+vh:oy+dh;
     for(int y=y0;y<y1;y++){int sy=((y-oy)*w->image.height)/dh;for(int x=x0;x<x1;x++){int sx=((x-ox)*w->image.width)/dw;const uint8_t *p=w->image.rgba+((sy*w->image.width+sx)*4);vbe_putpixel(x,y,image_blend(p,(((x-vx)/8+(y-vy)/8)&1)?RGB(0x31,0x31,0x31):RGB(0x22,0x22,0x22)));}}
-    char inf[96],n[16];kstrcpy(inf,atm_image_format_name(w->image.format));kstrcat(inf,"  ");kitoa(w->image.width,n,10);kstrcat(inf,n);kstrcat(inf,"x");kitoa(w->image.height,n,10);kstrcat(inf,n);kstrcat(inf,"  ");if(w->image_zoom>0){kitoa(w->image_zoom,n,10);kstrcat(inf,n);kstrcat(inf,"% of fit");}else kstrcat(inf,"fit");kstrcat(inf,"  + / - zoom, 0 fit");T(cx+8,cy+ch-20,inf,C_SUBTEXT,C_BASE);
+    char inf[112],n[16];kstrcpy(inf,atm_image_format_name(w->image.format));kstrcat(inf,"  ");kitoa(w->image.width,n,10);kstrcat(inf,n);kstrcat(inf,"x");kitoa(w->image.height,n,10);kstrcat(inf,n);kstrcat(inf,"  ");if(w->image_zoom>0){kitoa(w->image_zoom,n,10);kstrcat(inf,n);kstrcat(inf,"% of fit");}else kstrcat(inf,"fit");kstrcat(inf,"  + / - zoom, 0 fit, A apply wallpaper");T(cx+8,cy+ch-20,inf,C_SUBTEXT,C_BASE);
 }
-static void image_viewer_key(exp_win_t *w,int k){if(!w->image.rgba)return;if(k=='+'){w->image_zoom=w->image_zoom?w->image_zoom+25:125;if(w->image_zoom>400)w->image_zoom=400;}else if(k=='-'){w->image_zoom=w->image_zoom?w->image_zoom-25:75;if(w->image_zoom<25)w->image_zoom=25;}else if(k=='0'||k=='f'||k=='F')w->image_zoom=0;exp_force_redraw=1;}
+static void image_viewer_key(exp_win_t *w,int k){
+    if(!w->image.rgba)return;
+    if(k=='+'){w->image_zoom=w->image_zoom?w->image_zoom+25:125;if(w->image_zoom>400)w->image_zoom=400;}
+    else if(k=='-'){w->image_zoom=w->image_zoom?w->image_zoom-25:75;if(w->image_zoom<25)w->image_zoom=25;}
+    else if(k=='0'||k=='f'||k=='F')w->image_zoom=0;
+    else if(k=='a'||k=='A'){
+        if(exp_wallpaper_apply(w->image_path)){char msg[96];kstrcpy(msg,"Image wallpaper applied: ");kstrcat(msg,w->image_path);exp_notify(msg,C_GREEN);}else exp_notify("Wallpaper apply failed",C_RED);
+    }
+    exp_force_redraw=1;
+}
 
 /* ─── ArchiveEx: validated native TAR.ZST/ATPK frontend ─── */
 static void archiveex_release(exp_win_t *w){if(w->archive_data){kfree(w->archive_data);w->archive_data=NULL;}w->archive_size=0;w->archive_valid=0;}
@@ -1105,7 +1141,7 @@ static void draw_settings(exp_win_t *w){
         R(cx+8,sy,148,30,dark?C_SURFACE1:C_MANTLE);BOX(cx+8,sy,148,30,dark?C_TEXT:C_SURFACE1);T(cx+16,sy+7,"D. Dark Mono",dark?C_TEXT:C_SUBTEXT,dark?C_SURFACE1:C_MANTLE);
         R(cx+168,sy,148,30,!dark?C_SURFACE1:C_MANTLE);BOX(cx+168,sy,148,30,!dark?C_TEXT:C_SURFACE1);T(cx+176,sy+7,"W. White Paper",!dark?C_TEXT:C_SUBTEXT,!dark?C_SURFACE1:C_MANTLE);sy+=42;
         T(cx+8,sy,"Interface scale: fixed at 100% for stable layout.",C_SUBTEXT,C_BASE);sy+=22;
-        T(cx+8,sy,"Desktop wallpaper (press 1-4; saved automatically):",C_LAVENDER,C_BASE); sy+=24;
+        T(cx+8,sy,"Built-in wallpaper (press 1-4; clears image wallpaper):",C_LAVENDER,C_BASE); sy+=24;
         for(int i=0;i<4;i++){
             int tx=cx+8+(i%2)*160, ty=sy+(i/2)*62;
             R(tx,ty,148,52,C_MANTLE); BOX(tx,ty,148,52,i==wallpaper_id?C_TEXT:C_SURFACE1);
@@ -1116,8 +1152,8 @@ static void draw_settings(exp_win_t *w){
             T(tx+8,ty+34,tag,i==wallpaper_id?C_TEXT:C_SUBTEXT,C_MANTLE);
         }
         sy+=138;
-        TF(cx+8,sy,C_SUBTEXT,C_BASE,"Current: %s",wallpaper_name(wallpaper_id)); sy+=18;
-        T(cx+8,sy,"Wallpapers use the selected Dark Mono or White Paper palette.",C_SUBTEXT,C_BASE); sy+=18;
+        TF(cx+8,sy,C_SUBTEXT,C_BASE,"Current: %s",wallpaper_label()); sy+=18;
+        T(cx+8,sy,"Open PNG/JPEG/BMP in Viewer and press A to apply it as wallpaper.",C_SUBTEXT,C_BASE); sy+=18;
         T(cx+8,sy,"Resolution: choose 640x480, 800x600 or 1024x768 in GRUB",C_SUBTEXT,C_BASE);
     } else if(w->cfg_tab==1){
         T(cx+8,sy,l10n_get(L10N_LANGUAGE_DESC),C_LAVENDER,C_BASE); sy+=24;
@@ -1159,8 +1195,8 @@ static void draw_settings(exp_win_t *w){
     (void)ch;
 }
 static void settings_wallpaper_set(int id){
-    if(id<0||id>3)return;wallpaper_id=id;char value[2]={(char)('1'+id),0};
-    sysconf_set("desktop","wallpaper",value);sysconf_save();
+    if(id<0||id>3)return;wallpaper_file_clear(0);wallpaper_id=id;char value[2]={(char)('1'+id),0};
+    sysconf_set("desktop","wallpaper",value);sysconf_set("desktop","wallpaper_file","");sysconf_save();
     char msg[48];kstrcpy(msg,"Wallpaper: ");kstrcat(msg,wallpaper_name(wallpaper_id));exp_notify(msg,C_TEXT);exp_force_redraw=1;
 }
 static void settings_theme_set(exp_theme_t id){
@@ -1574,6 +1610,8 @@ void exp_init(void){
     exp_theme_set(ui_theme&&!kstrcmp(ui_theme,"white")?EXP_THEME_WHITE:EXP_THEME_DARK,0);
     const char *wp=sysconf_get("desktop","wallpaper");
     wallpaper_id=(wp&&wp[0]>='1'&&wp[0]<='4')?(wp[0]-'1'):0;
+    const char *wallpaper_file=sysconf_get("desktop","wallpaper_file");
+    if(wallpaper_file&&wallpaper_file[0]&&wallpaper_file_set(wallpaper_file,0)<0)exp_notify("Saved wallpaper could not be loaded",C_YELLOW);
     DE.last_clock=pit_get_ticks();
     (void)vbe_double_buffer_enable();
     vbe_clear(C_BASE);
@@ -1588,16 +1626,19 @@ void exp_run(void){
     int last_mouse_x=-1,last_mouse_y=-1; uint8_t last_mouse_buttons=0;
     while(DE.running){
         clock_update();
+        uint32_t now=pit_get_ticks();
         const mouse_state_t *mouse=mouse_state();
         if(mouse && mouse->available){
             int changed=(mouse->x!=last_mouse_x || mouse->y!=last_mouse_y || mouse->buttons!=last_mouse_buttons);
+            int button_changed=mouse->buttons!=last_mouse_buttons;
             mouse_state_t virtual_mouse=*mouse;
             virtual_mouse.x=EXP_UNSCALE(mouse->x); virtual_mouse.y=EXP_UNSCALE(mouse->y);
             exp_mouse_update(&virtual_mouse,last_mouse_buttons);
             last_mouse_x=mouse->x; last_mouse_y=mouse->y; last_mouse_buttons=mouse->buttons;
-            if(changed){full_redraw();continue;}
+            /* PS/2 mice can report far faster than software VBE can present in
+             * a VM. Preserve click feedback, but coalesce motion-only frames. */
+            if(changed&&(button_changed||now-mouse_last_tick>=3)){mouse_last_tick=now;full_redraw();continue;}
         }
-        uint32_t now=pit_get_ticks();
         if(now-last_ref>=10){
             int animated=0;last_ref=now;
             for(int i=0;i<DE.win_count;i++){

@@ -38,6 +38,7 @@
 #include "atmbox.h"
 #include "fileformat.h"
 #include "image_fixtures.h"
+#include "image_decode.h"
 #include "exp.h"
 #include "awm.h"
 #include "ttf.h"
@@ -2082,12 +2083,44 @@ void dispatch(char *line) {
     else if (!kstrcmp(cmd,"printenv")){ if(argc>=2){const char*v=sdk_env_get(argv[1]);if(v)con_writeln(v);}else sdk_env_list(); }
     /* Disk / FS */
     else if (!kstrcmp(cmd,"lsblk"))  {
-        con_writeln("NAME  TYPE  SIZE   MODEL");
+        if(argc>=2 && !kstrcmp(argv[1],"--rescan")){
+            if(catfs.mounted){C_WRN();con_writeln("lsblk: rescan refused while CatFS is mounted; unmount first.");C_NRM();goto done;}
+            disk_init();
+        }
+        con_writeln("NAME  TYPE   SIZE    PTYPE  FS       MODEL / RANGE");
         for(int i=0;i<DISK_MAX_DRIVES;i++){
             if(!disk_drives[i].present) continue;
-            cprintf("hd%c   disk  %4uM  %s\n",'a'+i,disk_drives[i].sectors/2048,disk_drives[i].model);
+            uint32_t mib=disk_capacity_mib(i);
+            cprintf("hd%c   disk  %5uM  ATA    -        %s\n",'a'+i,mib,disk_drives[i].model[0]?disk_drives[i].model:"ATA PIO disk");
+            mbr_table_t table;int mbr_rc=mbr_read(i,&table);
+            if(mbr_rc==0 && mbr_validate_drive(i,&table)==0){
+                for(int p=0;p<PART_MAX_ENTRIES;p++){
+                    mbr_entry_t *e=&table.entries[p];
+                    if(!e->type || !e->sector_count) continue;
+                    cprintf("hd%c%d  part  %5uM  0x%x  %s  lba=%u sectors=%u (%s)\n",'a'+i,p+1,e->sector_count/2048u,e->type,mbr_probe_filesystem(i,e),e->lba_start,e->sector_count,part_type_name(e->type));
+                }
+            } else if(mbr_rc<0) {
+                cprintf("hd%c   table  -      -      -        no MBR 55AA signature or sector read failure\n",'a'+i);
+            } else {
+                cprintf("hd%c   table  -      -      -        MBR signature present but ranges/status overlap or capacity validation failed\n",'a'+i);
+            }
         }
-        if(!disk_count){C_WRN();con_writeln("No block devices found");C_NRM();}
+        if(!disk_count){
+            C_WRN();con_writeln("No ATA PIO block disks detected.");
+            con_writeln("Use an IDE/ATA drive in the current build; AHCI, NVMe and USB mass-storage are not block drivers yet.");C_NRM();
+        }
+    }
+    else if (!kstrcmp(cmd,"usb")) {
+        int hosts=0;
+        C_HDR();con_writeln("USB controller discovery");C_NRM();
+        for(int i=0;i<g_pci.count;i++){
+            pci_device_t *p=&g_pci.devs[i];
+            if(p->class_code!=0x0C || p->subclass!=0x03) continue;
+            cprintf("  %02x:%02x.%u  USB host controller interface=0x%x vendor=%04x device=%04x\n",p->bus,p->dev,p->fn,p->prog_if,p->vendor,p->device);
+            hosts++;
+        }
+        if(!hosts) con_writeln("  no PCI USB host controller detected");
+        C_DIM();con_writeln("USB device enumeration and BOT/SCSI mass-storage transport are not implemented; no USB disk is exposed as a block device yet.");C_NRM();
     }
     else if (!kstrcmp(cmd,"df")) {
         con_writeln("Filesystem  1K-blocks   Used  Avail  Use%  Mounted");
@@ -2465,8 +2498,8 @@ void dispatch(char *line) {
             cprintf("  Ring 3 gate   : %s (TSS rsp0 + DPL3 int 0x80)\n",usermode_gate_ready()?"ready":"closed");
             C_DIM(); con_writeln("  Next: complete CPL3 exit/context-switch handoff and add process-owned fd tables; no Linux binary ABI."); C_NRM();
         } else if(!kstrcmp(argv[1],"test")) {
-            int pt=paging_selftest(), ua=uaccess_selftest(), ps=atm_posix_selftest(), sc=atm_syscall_selftest(), nf=native_fd_selftest(), na=native_app_selftest(), lc=native_app_libc_selftest();
-            cprintf("posix test: paging=%s uaccess=%s vfs-posix=%s syscall-usercopy=%s process-fd=%s native-cpl3=%s static-libc=%s\n",pt==0?"OK":"FAIL",ua==0?"OK":"FAIL",ps==0?"OK":"FAIL",sc==0?"OK":"FAIL",nf==0?"OK":"FAIL",na==0?"OK":"FAIL",lc==0?"OK":"FAIL");
+            int pt=paging_selftest(), ua=uaccess_selftest(), ps=atm_posix_selftest(), sc=atm_syscall_selftest(), nf=native_fd_selftest(), na=native_app_selftest(), lc=native_app_libc_selftest(), im=atm_image_selftest();
+            cprintf("posix test: paging=%s uaccess=%s vfs-posix=%s syscall-usercopy=%s process-fd=%s native-cpl3=%s static-libc=%s image-bmp=%s\n",pt==0?"OK":"FAIL",ua==0?"OK":"FAIL",ps==0?"OK":"FAIL",sc==0?"OK":"FAIL",nf==0?"OK":"FAIL",na==0?"OK":"FAIL",lc==0?"OK":"FAIL",im==0?"OK":"FAIL");
         } else if(!kstrcmp(argv[1],"ring3")) {
             if(!session_is_privileged()){ C_ERR(); con_writeln("posix ring3: administrator privileges required"); C_NRM(); goto done; }
             C_WRN(); con_write("Type RING3 to enter destructive CPL 3 diagnostic: "); C_NRM();
@@ -2489,6 +2522,13 @@ void dispatch(char *line) {
     else if (!kstrcmp(cmd,"notepad")) {
         if(!use_vbe || !exp_is_active()){C_ERR();con_writeln("notepad: open Exp first with 'de'");C_NRM();goto done;}
         if(exp_open_app(APP_NOTEPAD,NULL)<0){C_ERR();con_writeln("notepad: no free window slot");C_NRM();}
+    }
+    else if (!kstrcmp(cmd,"wallpaper")) {
+        if(!use_vbe||!exp_is_active()){C_ERR();con_writeln("wallpaper: open Exp first with 'de'");C_NRM();goto done;}
+        if(argc<2){cprintf("wallpaper: %s\n",exp_wallpaper_current());goto done;}
+        char path[128];build_abs(argv[1],path);
+        if(exp_wallpaper_apply(path)<0){C_ERR();con_writeln("wallpaper: apply failed; supported formats are PNG, JPEG and uncompressed 24/32-bit BMP");C_NRM();}
+        else {C_OK();cprintf("wallpaper: applied %s\n",path);C_NRM();}
     }
     else if (!kstrcmp(cmd,"de")) {
         if(!use_vbe || boot_text_mode){C_ERR();con_writeln("de: unavailable in Text mode");C_NRM();goto done;}
@@ -2645,7 +2685,7 @@ void dispatch(char *line) {
         const char *grps[][2] = {
             {"Files",   "ls ll la cat view less head tail file hd hexdump wc grep sort uniq cut tr tee"},
             {"Edit",    "write append touch rm cp mv mkdir rmdir tree find stat chmod chown ln"},
-            {"Apps",    "de  gui open <id>  notepad  files  editor  monitor  settings"},
+            {"Apps",    "de  gui open <id>  notepad  files  editor  monitor  settings  wallpaper [path]"},
             {"Disk",    "lsblk df du mount umount mkfs sync live"},
             {"System",  "uname info hwinfo lscpu cpucompat uptime mem free ps kill dmesg date which man modules"},
             {"Network", "ifconfig netstat ping arp route unm connect|disconnect|status|profiles|save untui"},
@@ -2848,8 +2888,29 @@ void kernel_main(uint64_t mb_magic, uint64_t mbinfo_phys) {
     image_fixtures_seed();
     init_proc_files();
 
-        disk_init();
-    if (disk_count > 0 && disk_drives[0].present && catfs_mount(0) == 0) {
+    /* Safe discovery only: PCI configuration-space reads populate storage and
+     * USB controller diagnostics without enabling or driving those devices. */
+    pci_init(&g_pci);
+    radio_detect(&g_radio,&g_pci);
+    disk_init();
+    /* Preserve legacy whole-disk CatFS while also accepting the aligned primary
+     * CatFS partition created by the standalone installer. */
+    int mounted_catfs=0;
+    for(int drive=0;drive<DISK_MAX_DRIVES&&!mounted_catfs;drive++){
+        if(!disk_drives[drive].present)continue;
+        if(catfs_mount(drive)==0)mounted_catfs=1;
+        else {
+            mbr_table_t table;
+            if(mbr_read(drive,&table)==0&&mbr_validate_drive(drive,&table)==0){
+                for(int part=0;part<PART_MAX_ENTRIES;part++){
+                    mbr_entry_t *entry=&table.entries[part];
+                    if(!entry->type||!entry->sector_count)continue;
+                    if(!kstrcmp(mbr_probe_filesystem(drive,entry),"CatFS")&&catfs_mount_at(drive,entry->lba_start)==0){mounted_catfs=1;break;}
+                }
+            }
+        }
+    }
+    if(mounted_catfs){
         if (catfs_vfs_mount("/data") == 0) live_mode = 0;
         else { catfs_sync(); catfs.mounted = 0; }
     }

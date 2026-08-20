@@ -25,5 +25,7 @@ int  atm_image_decode_memory(const uint8_t *data,uint32_t size,const char *name,
 int  atm_image_decode_file(const char *path,atm_image_t *out);
 void atm_image_release(atm_image_t *image);
 const char *atm_image_format_name(atm_image_format_t format);
+/* Bounded memory-decoder regression, including 24-bit BMP ownership path. */
+int  atm_image_selftest(void);
 
 #endif
