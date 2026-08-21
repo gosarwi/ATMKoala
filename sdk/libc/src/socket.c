@@ -19,3 +19,5 @@ int accept(int fd,struct sockaddr *addr,socklen_t *len){
     if(rc>=0 && addr && len) *len=sizeof(struct sockaddr);
     return rc;
 }
+ssize_t send(int fd,const void *buf,size_t len,int flags){return (ssize_t)__atm_sysret(atm_send(fd,buf,(uint64_t)len,(uint32_t)flags));}
+ssize_t recv(int fd,void *buf,size_t len,int flags){return (ssize_t)__atm_sysret(atm_recv(fd,buf,(uint64_t)len,(uint32_t)flags));}

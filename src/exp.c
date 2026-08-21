@@ -6,6 +6,8 @@
 #include "vfs.h"
 #include "util.h"
 #include "pit.h"
+#include "rtc.h"
+#include "atm_time.h"
 #include "sched.h"
 #include "kmalloc.h"
 #include "net.h"
@@ -19,6 +21,7 @@
 #include "mouse.h"
 #include "tinygl_lite.h"
 #include "ttf.h"
+#include "font.h"
 #include "hw_y116.h"
 #include "gui_demo.h"
 #include <stdint.h>
@@ -76,6 +79,15 @@ int exp_gui_register(const exp_gui_app_t *app){
 #define VL(x,y,h,c)   vbe_draw_vline(EXP_SCALE(x),EXP_SCALE(y),EXP_SCALE(h),c)
 #define BOX(x,y,w,h,c) vbe_draw_rect(EXP_SCALE(x),EXP_SCALE(y),EXP_SCALE(w),EXP_SCALE(h),c)
 #define T(x,y,s,f,b)  ttf_render_string_percent(EXP_SCALE(x),EXP_SCALE(y),s,f,b,exp_ui_scale_pct)
+#define TC(x,y,s,f,b,w) ttf_render_string_clipped(EXP_SCALE(x),EXP_SCALE(y),s,f,b,EXP_SCALE(w))
+#define TW(x,y,s,f,b,w,rows) ttf_render_string_wrapped(EXP_SCALE(x),EXP_SCALE(y),s,f,b,EXP_SCALE(w),rows)
+static int exp_text_width(const char *s){return s?utf8_strlen(s)*ttf_glyph_width():0;}
+int exp_text_layout_selftest(void){
+    static const char russian[]="Русский";
+    int glyphs=utf8_strlen(russian), bytes=(int)kstrlen(russian);
+    if(glyphs!=7||bytes!=14)return -1;
+    return exp_text_width(russian)==glyphs*ttf_glyph_width()?0:-1;
+}
 #define CX(w) ((w)->x+2)
 #define CY(w) ((w)->y+DE_TITLEBAR_H+1)
 #define CW(w) ((w)->w-4)
@@ -195,8 +207,11 @@ static void draw_app_icon(app_id_t app,int x,int y,int size,color32_t fg,color32
 
 /* ─── System tray ────────────────────────────────────────── */
 static void tray_refresh_hardware(void){
-    /* Telemetry is populated only by validated boot-time drivers. The Exp
-     * render path must never issue EC/PCI/MSR traffic or wait for hardware. */
+    /* The UI never probes PCI/USB/MMIO. Battery providers, when available,
+     * are refreshed at most once a second and otherwise remain explicitly
+     * unavailable rather than showing a fabricated percentage. */
+    static uint32_t last_tick=0;uint32_t now=sched_uptime_ticks();
+    if(now-last_tick>=100u){battery_update(&g_battery);last_tick=now;}
 }
 static void draw_tray_battery(int x,int y){
     color32_t c=!g_battery.valid?C_OVERLAY0:(!g_battery.present?C_SUBTEXT:(g_battery.capacity_pct<20?C_RED:(g_battery.charging?C_GREEN:C_TEXT)));
@@ -205,16 +220,16 @@ static void draw_tray_battery(int x,int y){
     else {HL(x+3,y+8,8,c);VL(x+7,y+5,6,c);}
 }
 static void draw_tray_wifi(int x,int y){
-    color32_t c=g_radio.wifi_driver_ready?C_GREEN:(g_radio.wifi_controller_present?C_YELLOW:C_OVERLAY0);
-    /* Three nested radio bands plus a distinct centre node. */
+    color32_t c=g_radio.wifi_connected?C_GREEN:(g_radio.wifi_driver_ready?C_YELLOW:(g_radio.wifi_controller_present?C_YELLOW:C_OVERLAY0));
+    /* A green glyph is reserved for association reported by a Wi-Fi driver. */
     R(x+1,y+3,12,1,c);R(x+2,y+4,10,1,c);R(x+3,y+6,8,1,c);R(x+4,y+7,6,1,c);R(x+5,y+9,4,1,c);R(x+6,y+11,2,2,c);
-    if(!g_radio.wifi_driver_ready){R(x+11,y+10,3,2,c);R(x+12,y+8,2,2,c);}
+    if(!g_radio.wifi_connected){R(x+11,y+10,3,2,c);R(x+12,y+8,2,2,c);}
 }
 static void draw_tray_bluetooth(int x,int y){
-    color32_t c=g_radio.bluetooth_driver_ready?C_GREEN:(g_radio.bluetooth_controller_present?C_YELLOW:C_OVERLAY0);
-    /* Compact recognisable Bluetooth rune, with status dot only when no HCI driver exists. */
+    color32_t c=g_radio.bluetooth_connected?C_GREEN:(g_radio.bluetooth_driver_ready?C_YELLOW:(g_radio.bluetooth_controller_present?C_YELLOW:C_OVERLAY0));
+    /* Green means an HCI driver reports an active connection, not merely USB presence. */
     VL(x+7,y+2,12,c);R(x+8,y+3,2,2,c);R(x+10,y+5,2,2,c);R(x+8,y+7,2,2,c);R(x+8,y+9,2,2,c);R(x+10,y+11,2,2,c);R(x+8,y+13,2,2,c);
-    if(!g_radio.bluetooth_driver_ready)R(x+1,y+12,3,3,c);
+    if(!g_radio.bluetooth_connected)R(x+1,y+12,3,3,c);
 }
 
 /* ─── Taskbar ────────────────────────────────────────────── */
@@ -369,7 +384,9 @@ static void draw_chrome(exp_win_t *w, int focused){
     HL(w->x+1,w->y+1,w->w-2,focused?C_SURFACE2:C_SURFACE1);
     HL(w->x+1,w->y+DE_TITLEBAR_H,w->w-2,focused?C_PEACH:C_SURFACE2);
     draw_app_icon(w->app,w->x+14,w->y+3,16,tf,tb);
-    T(w->x+36,w->y+3,w->title,tf,tb);
+    /* Title is bounded before the window controls; UTF-8 is clipped only on
+     * codepoint boundaries, so Cyrillic titles cannot enter control buttons. */
+    TC(w->x+36,w->y+3,w->title,tf,tb,w->w-100);
     /* Compact, consistently framed window controls. */
     int bx=w->x+w->w-20;
     R(bx,w->y+3,16,15,C_RED);BOX(bx,w->y+3,16,15,focused?C_TEXT:C_SURFACE2);
@@ -1014,39 +1031,84 @@ static void mines_key(exp_win_t*w,int k){exp_mines_t*m=&w->mines;if(k=='r'||k=='
 static void snake_init(exp_win_t*w){exp_snake_t*s=&w->snake;kmemset(s,0,sizeof(*s));s->length=4;s->dx=1;s->dy=0;s->body[0].x=9;s->body[0].y=7;for(int i=1;i<s->length;i++){s->body[i].x=9-i;s->body[i].y=7;}s->food.x=15;s->food.y=7;s->last_tick=pit_get_ticks();}
 static int snake_has(exp_snake_t*s,int x,int y){for(int i=0;i<s->length;i++)if(s->body[i].x==x&&s->body[i].y==y)return 1;return 0;}
 static void snake_food(exp_snake_t*s){for(int n=0;n<256;n++){int x=(int)(gui_rand()%20u),y=(int)(gui_rand()%14u);if(!snake_has(s,x,y)){s->food.x=x;s->food.y=y;return;}}}
-static void snake_tick(exp_win_t*w){exp_snake_t*s=&w->snake;uint32_t now=pit_get_ticks();if(s->state||now-s->last_tick<12)return;s->last_tick=now;int nx=s->body[0].x+s->dx,ny=s->body[0].y+s->dy;if(nx<0||ny<0||nx>=20||ny>=14||snake_has(s,nx,ny)){s->state=1;return;}for(int i=s->length;i>0;i--)s->body[i]=s->body[i-1];s->body[0].x=nx;s->body[0].y=ny;if(nx==s->food.x&&ny==s->food.y){if(s->length<95)s->length++;s->score+=10;snake_food(s);}else s->body[s->length]=s->body[s->length-1];}
+/* A frame can be delayed by software VBE work on physical hardware.  Advance
+ * a bounded number of fixed-tick steps rather than resetting the deadline,
+ * otherwise Snake visually appears to stop whenever Exp misses a frame. */
+static void snake_tick(exp_win_t*w){
+    exp_snake_t*s=&w->snake;uint32_t now=pit_get_ticks();
+    if(s->state||now-s->last_tick<12)return;
+    uint32_t steps=(now-s->last_tick)/12;if(steps>4)steps=4;
+    s->last_tick+=steps*12;
+    while(steps--&&!s->state){
+        int nx=s->body[0].x+s->dx,ny=s->body[0].y+s->dy;
+        int eat=nx==s->food.x&&ny==s->food.y;
+        int tail=(s->length>0&&s->body[s->length-1].x==nx&&s->body[s->length-1].y==ny);
+        if(nx<0||ny<0||nx>=20||ny>=14||(snake_has(s,nx,ny)&&(eat||!tail))){s->state=1;break;}
+        int grow=eat&&s->length<96;if(grow)s->length++;
+        for(int i=s->length-1;i>0;i--)s->body[i]=s->body[i-1];
+        s->body[0].x=nx;s->body[0].y=ny;
+        if(eat){s->score+=10;snake_food(s);}
+    }
+}
 static void draw_snake_app(exp_win_t*w){exp_snake_t*s=&w->snake;int cx=CX(w),cy=CY(w),cell=16,bx=cx+14,by=cy+44;R(cx,cy,CW(w),CH(w),C_BASE);T(cx+14,cy+10,"SNAKE",C_GREEN,C_BASE);char score[64];ksnprintf(score,sizeof(score),"Score %d  | arrows steer  | R restart",s->score);T(cx+14,cy+26,score,C_SUBTEXT,C_BASE);R(bx-2,by-2,20*cell+4,14*cell+4,C_CRUST);BOX(bx-2,by-2,20*cell+4,14*cell+4,C_SURFACE2);R(bx+s->food.x*cell+3,by+s->food.y*cell+3,cell-6,cell-6,C_PEACH);for(int i=s->length-1;i>=0;i--){color32_t c=i?C_GREEN:C_TEXT;R(bx+s->body[i].x*cell+2,by+s->body[i].y*cell+2,cell-4,cell-4,c);}if(s->state)T(bx+86,by+104,"GAME OVER",C_YELLOW,C_CRUST);int cb=by+14*cell+12;static const char*ctl[]={"Left","Up","Down","Right"};for(int i=0;i<4;i++){int bw=i==3?74:54,bx2=cx+14+(i==0?0:(i==1?58:(i==2?116:174)));R(bx2,cb,bw,24,C_MANTLE);BOX(bx2,cb,bw,24,C_SURFACE2);T(bx2+6,cb+5,ctl[i],C_SUBTEXT,C_MANTLE);}}
 static void snake_key(exp_win_t*w,int k){exp_snake_t*s=&w->snake;if(k=='r'||k=='R'){snake_init(w);return;}if(k==KEY_LEFT&&s->dx!=1){s->dx=-1;s->dy=0;}else if(k==KEY_RIGHT&&s->dx!=-1){s->dx=1;s->dy=0;}else if(k==KEY_UP&&s->dy!=1){s->dx=0;s->dy=-1;}else if(k==KEY_DOWN&&s->dy!=-1){s->dx=0;s->dy=1;}}
+
+static color32_t paint_color(int c){switch(c&7){case 0:return C_BASE;case 1:return C_TEXT;case 2:return C_RED;case 3:return C_PEACH;case 4:return C_YELLOW;case 5:return C_GREEN;case 6:return C_TEAL;default:return C_MAUVE;}}
+static void paint_init(exp_win_t*w){kmemset(&w->paint,0,sizeof(w->paint));w->paint.color=1;}
+static void draw_paint_app(exp_win_t*w){
+    exp_paint_t*p=&w->paint;int cx=CX(w),cy=CY(w),cell=12,bx=cx+14,by=cy+60;
+    R(cx,cy,CW(w),CH(w),C_BASE);T(cx+14,cy+10,"PAINT",C_LAVENDER,C_BASE);
+    T(cx+14,cy+27,"Arrows move | Space paint | 1-8 color | B eraser | C clear",C_SUBTEXT,C_BASE);
+    for(int i=0;i<8;i++){int px=bx+i*27;R(px,cy+40,20,14,paint_color(i));BOX(px,cy+40,20,14,i==p->color?C_TEXT:C_SURFACE2);char n[2]={(char)('1'+i),0};T(px+6,cy+42,n,i==0?C_TEXT:C_BASE,paint_color(i));}
+    R(bx-2,by-2,EXP_PAINT_W*cell+4,EXP_PAINT_H*cell+4,C_CRUST);BOX(bx-2,by-2,EXP_PAINT_W*cell+4,EXP_PAINT_H*cell+4,C_SURFACE2);
+    for(int y=0;y<EXP_PAINT_H;y++)for(int x=0;x<EXP_PAINT_W;x++){int px=bx+x*cell,py=by+y*cell;R(px,py,cell-1,cell-1,paint_color(p->pixels[y][x]));if(x==p->cursor_x&&y==p->cursor_y)BOX(px,py,cell-1,cell-1,C_YELLOW);}
+    T(cx+14,by+EXP_PAINT_H*cell+10,"Canvas is local to this window; export/save is not implemented yet.",C_OVERLAY0,C_BASE);
+}
+static void paint_key(exp_win_t*w,int k){exp_paint_t*p=&w->paint;if(k==KEY_LEFT&&p->cursor_x>0)p->cursor_x--;else if(k==KEY_RIGHT&&p->cursor_x+1<EXP_PAINT_W)p->cursor_x++;else if(k==KEY_UP&&p->cursor_y>0)p->cursor_y--;else if(k==KEY_DOWN&&p->cursor_y+1<EXP_PAINT_H)p->cursor_y++;else if(k==' '||k=='\n'||k=='\r')p->pixels[p->cursor_y][p->cursor_x]=(uint8_t)p->color;else if(k>='1'&&k<='8')p->color=k-'1';else if(k=='b'||k=='B')p->color=0;else if(k=='c'||k=='C')kmemset(p->pixels,0,sizeof(p->pixels));}
 
 static int calendar_leap(int y){return (y%4==0&&y%100!=0)||y%400==0;}
 static int calendar_days(int y,int m){static const uint8_t d[]={31,28,31,30,31,30,31,31,30,31,30,31};return m==2?d[1]+calendar_leap(y):d[m-1];}
 static int calendar_weekday(int y,int m,int d){static const uint8_t t[]={0,3,2,5,0,3,5,1,4,6,2,4};if(m<3)y--;return (y+y/4-y/100+y/400+t[m-1]+d)%7;}
+static int calendar_rtc(rtc_datetime_t *t){const char *basis=sysconf_get("system","rtc_basis"),*zone=sysconf_get("system","timezone");if(basis&&!kstrcmp(basis,"local"))return rtc_read_datetime(t)==0;return atm_local_datetime(zone&&zone[0]?zone:"UTC",t,NULL,NULL)==0;}
 static void draw_calendar_app(exp_win_t *w){
     static const char *const mon[]={"January","February","March","April","May","June","July","August","September","October","November","December"};
     static const char *const dow[]={"Su","Mo","Tu","We","Th","Fr","Sa"};
+    rtc_datetime_t today;int have_today=calendar_rtc(&today);
+    if(w->cal_year<1){w->cal_follow_today=1;if(have_today){w->cal_year=today.year;w->cal_month=today.month;}else{w->cal_year=2026;w->cal_month=1;}}
+    if(w->cal_follow_today&&have_today){w->cal_year=today.year;w->cal_month=today.month;}
+    if(w->cal_month<1||w->cal_month>12)w->cal_month=1;
     int cx=CX(w),cy=CY(w),cw2=CW(w),ch=CH(w);R(cx,cy,cw2,ch,C_BASE);
-    if(w->cal_year<1)w->cal_year=2026;if(w->cal_month<1||w->cal_month>12)w->cal_month=1;
     char title[64];ksnprintf(title,sizeof(title),"%s %d",mon[w->cal_month-1],w->cal_year);T(cx+14,cy+12,title,C_LAVENDER,C_BASE);
-    T(cx+14,cy+28,"Manual calendar | Left/Right month | Up/Down year",C_SUBTEXT,C_BASE);
+    char info[96];if(have_today)ksnprintf(info,sizeof(info),"Today: %04d-%02d-%02d | Left/Right month | Up/Down year | T today",today.year,today.month,today.day);else kstrcpy(info,"RTC date unavailable | Left/Right month | Up/Down year");T(cx+14,cy+28,info,C_SUBTEXT,C_BASE);
     int gx=cx+14,gy=cy+54,gw=cw2-28,cellw=gw/7,cellh=25;
     for(int i=0;i<7;i++)T(gx+i*cellw+6,gy,dow[i],i==0||i==6?C_PEACH:C_SUBTEXT,C_BASE);
     int first=calendar_weekday(w->cal_year,w->cal_month,1),days=calendar_days(w->cal_year,w->cal_month);
-    for(int d=1;d<=days;d++){int slot=first+d-1,row=slot/7,col=slot%7,px=gx+col*cellw,py=gy+18+row*cellh; color32_t bg=(col==0||col==6)?C_MANTLE:C_SURFACE0;R(px,py,cellw-2,cellh-2,bg);char n[4];kitoa(d,n,10);T(px+7,py+4,n,col==0||col==6?C_PEACH:C_TEXT,bg);}
-    T(cx+14,gy+18+6*cellh+8,"System date is not claimed: set timezone now; RTC/NTP will provide real dates later.",C_OVERLAY0,C_BASE);
+    for(int d=1;d<=days;d++){int slot=first+d-1,row=slot/7,col=slot%7,px=gx+col*cellw,py=gy+18+row*cellh;int is_today=have_today&&w->cal_year==today.year&&w->cal_month==today.month&&d==today.day;color32_t bg=is_today?C_GREEN:((col==0||col==6)?C_MANTLE:C_SURFACE0);R(px,py,cellw-2,cellh-2,bg);if(is_today)BOX(px,py,cellw-2,cellh-2,C_TEXT);char n[4];kitoa(d,n,10);T(px+7,py+4,n,is_today?C_BASE:(col==0||col==6?C_PEACH:C_TEXT),bg);}
+    T(cx+14,gy+18+6*cellh+8,have_today?(w->cal_follow_today?"Following selected local date; month changes automatically at midnight.":"Manual month view; press T to return to today."):"No valid local RTC date; calendar remains manual.",C_OVERLAY0,C_BASE);
 }
-static void calendar_key(exp_win_t *w,int k){if(k==KEY_LEFT){if(--w->cal_month<1){w->cal_month=12;w->cal_year--;}}else if(k==KEY_RIGHT){if(++w->cal_month>12){w->cal_month=1;w->cal_year++;}}else if(k==KEY_UP)w->cal_year++;else if(k==KEY_DOWN&&w->cal_year>1)w->cal_year--;}
+static void calendar_key(exp_win_t *w,int k){rtc_datetime_t t;if(k=='t'||k=='T'){if(calendar_rtc(&t)){w->cal_follow_today=1;w->cal_year=t.year;w->cal_month=t.month;}return;}if(k==KEY_LEFT){w->cal_follow_today=0;if(--w->cal_month<1){w->cal_month=12;w->cal_year--;}}else if(k==KEY_RIGHT){w->cal_follow_today=0;if(++w->cal_month>12){w->cal_month=1;w->cal_year++;}}else if(k==KEY_UP){w->cal_follow_today=0;w->cal_year++;}else if(k==KEY_DOWN&&w->cal_year>1){w->cal_follow_today=0;w->cal_year--;}}
 
+static uint32_t stopwatch_ticks(const exp_win_t *w){return w->stopwatch_elapsed_ticks+(w->stopwatch_running?(sched_uptime_ticks()-w->stopwatch_started_tick):0);}
+static void stopwatch_toggle(exp_win_t *w){if(w->stopwatch_running){w->stopwatch_elapsed_ticks=stopwatch_ticks(w);w->stopwatch_running=0;}else{w->stopwatch_started_tick=sched_uptime_ticks();w->stopwatch_running=1;}}
+static void stopwatch_reset(exp_win_t *w){w->stopwatch_elapsed_ticks=0;w->stopwatch_started_tick=sched_uptime_ticks();}
+static void clock_key(exp_win_t *w,int k){if(k=='s'||k=='S'||k==' '||k=='\n'||k=='\r')stopwatch_toggle(w);else if(k=='r'||k=='R')stopwatch_reset(w);}
 static void draw_clock_app(exp_win_t *w){
-    int cx=CX(w),cy=CY(w),cw2=CW(w),ch=CH(w);
+    int cx=CX(w),cy=CY(w),cw2=CW(w),ch=CH(w);(void)ch;
     R(cx,cy,cw2,ch,C_BASE);
-    char clock[16]; clock_str(clock);
-    T(cx+18,cy+18,"SYSTEM CLOCK",C_SUBTEXT,C_BASE);
-    R(cx+18,cy+52,cw2-36,58,C_CRUST); BOX(cx+18,cy+52,cw2-36,58,C_SURFACE2);
-    T(cx+34,cy+72,clock,C_TEXT,C_CRUST);
-    uint32_t up=sched_uptime_ticks()/100;
-    char line[64]; ksnprintf(line,sizeof(line),"Uptime %02u:%02u:%02u",up/3600,(up/60)%60,up%60);
-    T(cx+18,cy+132,line,C_SUBTEXT,C_BASE);
-    T(cx+18,cy+154,"Monochrome local time display",C_OVERLAY0,C_BASE);
+    const char *zone=sysconf_get("system","timezone"),*basis=sysconf_get("system","rtc_basis");
+    int rtc_is_local=basis&&!kstrcmp(basis,"local"),offset=0,dst=0,have_time=0;
+    rtc_datetime_t local;
+    if(rtc_is_local)have_time=rtc_read_datetime(&local)==0;
+    else have_time=atm_local_datetime(zone&&zone[0]?zone:"UTC",&local,&offset,&dst)==0;
+    T(cx+18,cy+10,"SYSTEM CLOCK",C_SUBTEXT,C_BASE);
+    char zone_line[96];ksnprintf(zone_line,sizeof(zone_line),"%s  |  RTC %s",zone&&zone[0]?zone:"UTC",rtc_is_local?"local":"UTC");TC(cx+18,cy+26,zone_line,C_LAVENDER,C_BASE,cw2-36);
+    R(cx+18,cy+46,cw2-36,56,C_CRUST); BOX(cx+18,cy+46,cw2-36,56,C_SURFACE2);
+    if(have_time){char clock[16],date[32],meta[48];ksnprintf(clock,sizeof(clock),"%02d:%02d:%02d",local.hour,local.minute,local.second);ksnprintf(date,sizeof(date),"%04d-%02d-%02d",local.year,local.month,local.day);if(rtc_is_local)kstrcpy(meta,"Firmware local clock; no conversion");else{int a=offset<0?-offset:offset;ksnprintf(meta,sizeof(meta),"UTC%c%02d:%02d%s",offset<0?'-':'+',a/60,a%60,dst?"  DST":"");}T(cx+34,cy+58,clock,C_TEXT,C_CRUST);T(cx+164,cy+58,date,C_SUBTEXT,C_CRUST);T(cx+34,cy+78,meta,C_OVERLAY0,C_CRUST);}else T(cx+34,cy+66,"CMOS RTC or selected timezone unavailable",C_YELLOW,C_CRUST);
+    HL(cx+18,cy+116,cw2-36,C_SURFACE1);T(cx+18,cy+126,"STOPWATCH",C_SUBTEXT,C_BASE);
+    uint32_t ticks=stopwatch_ticks(w),centis=ticks%100u,total=ticks/100u;char watch[32];ksnprintf(watch,sizeof(watch),"%02u:%02u:%02u.%02u",total/3600u,(total/60u)%60u,total%60u,centis);
+    R(cx+18,cy+146,cw2-36,44,C_CRUST);BOX(cx+18,cy+146,cw2-36,44,C_SURFACE2);T(cx+34,cy+158,watch,C_TEXT,C_CRUST);
+    int bw=(cw2-44)/2,by=cy+204;R(cx+18,by,bw,28,w->stopwatch_running?C_YELLOW:C_SURFACE1);BOX(cx+18,by,bw,28,C_SURFACE2);T(cx+27,by+6,w->stopwatch_running?"Pause [S]":"Start [S]",w->stopwatch_running?C_BASE:C_TEXT,w->stopwatch_running?C_YELLOW:C_SURFACE1);R(cx+26+bw,by,bw,28,C_MANTLE);BOX(cx+26+bw,by,bw,28,C_SURFACE2);T(cx+35+bw,by+6,"Reset [R]",C_SUBTEXT,C_MANTLE);
+    T(cx+18,cy+244,"Stopwatch uses monotonic PIT ticks; it is independent of CMOS time.",C_OVERLAY0,C_BASE);
 }
 
 /* ─── Editor /Viewer ────────────────────────────────────── */
@@ -1172,8 +1234,8 @@ static void draw_settings(exp_win_t *w){
         color32_t tf=(i==w->cfg_tab)?C_TEXT:C_SUBTEXT;
         R(cx+i*tw,cy,tw,22,tb);
         HL(cx+i*tw,cy+22,tw,C_SURFACE1);
-        int tl=(int)kstrlen(tabs[i])*8;
-        T(cx+i*tw+(tw-tl)/2,cy+3,tabs[i],tf,tb);
+        int tl=exp_text_width(tabs[i]); if(tl>tw-8)tl=tw-8;
+        TC(cx+i*tw+(tw-tl)/2,cy+3,tabs[i],tf,tb,tw-8);
     }
     HL(cx,cy+22,cw2,C_SURFACE0);
     int sy=cy+32;
@@ -1199,14 +1261,17 @@ static void draw_settings(exp_win_t *w){
         T(cx+8,sy,"Open PNG/JPEG/BMP in Viewer and press A to apply it as wallpaper.",C_SUBTEXT,C_BASE); sy+=18;
         T(cx+8,sy,"Resolution: choose 640x480, 800x600 or 1024x768 in GRUB",C_SUBTEXT,C_BASE);
     } else if(w->cfg_tab==1){
-        T(cx+8,sy,l10n_get(L10N_LANGUAGE_DESC),C_LAVENDER,C_BASE); sy+=24;
+        /* Localized prose wraps inside the content pane.  This is especially
+         * important for Cyrillic, whose UTF-8 byte length is not its glyph count. */
+        int desc_rows=TW(cx+8,sy,l10n_get(L10N_LANGUAGE_DESC),C_LAVENDER,C_BASE,cw2-16,2);
+        sy+=(desc_rows>1?40:24);
         TF(cx+8,sy,C_TEXT,C_BASE,"Current: %s [%s]",l10n_current_name(),l10n_current_code()); sy+=28;
         for(uint32_t i=0;i<l10n_available_count();i++){
             int ly=sy+(int)i*34;int selected=kstrcmp(l10n_current_code(),l10n_available_code(i))==0; color32_t bg=selected?C_SURFACE1:C_MANTLE;
             R(cx+8,ly,cw2-16,28,bg);BOX(cx+8,ly,cw2-16,28,selected?C_TEXT:C_SURFACE1);
             TF(cx+16,ly+5,selected?C_TEXT:C_SUBTEXT,bg,"%u. %s [%s]",i+1,l10n_available_name(i),l10n_available_code(i));
         }
-        sy+=34*(int)l10n_available_count()+6;T(cx+8,sy,l10n_get(L10N_ONLY_ENGLISH),C_SUBTEXT,C_BASE);
+        sy+=34*(int)l10n_available_count()+6;TW(cx+8,sy,l10n_get(L10N_ONLY_ENGLISH),C_SUBTEXT,C_BASE,cw2-16,2);
     } else if(w->cfg_tab==2){
         sdk_cpuid_t cpu; sdk_cpuid(&cpu);
         T(cx+8,sy,"System Info:",C_LAVENDER,C_BASE); sy+=20;
@@ -1217,10 +1282,13 @@ static void draw_settings(exp_win_t *w){
         TF(cx+8,sy,C_TEXT,C_BASE,"Disk    %d  Net %s",disk_count,net.initialized?"UP":"--"); sy+=16;
         if(g_battery.valid&&g_battery.present) TF(cx+8,sy,C_TEXT,C_BASE,"Battery %u%%  %s",g_battery.capacity_pct,g_battery.charging?"charging":"discharging");
         else T(cx+8,sy,"Battery telemetry unavailable",C_SUBTEXT,C_BASE); sy+=16;
-        if(g_radio.wifi_driver_ready) T(cx+8,sy,"Wi-Fi connected",C_GREEN,C_BASE);
-        else if(g_radio.wifi_controller_present) T(cx+8,sy,"Wi-Fi controller: driver required",C_YELLOW,C_BASE);
+        if(g_radio.wifi_connected) TF(cx+8,sy,C_GREEN,C_BASE,"Wi-Fi connected  %u%% signal",g_radio.wifi_signal_pct);
+        else if(g_radio.wifi_driver_ready) T(cx+8,sy,"Wi-Fi driver ready; not associated",C_YELLOW,C_BASE);
+        else if(g_radio.wifi_controller_present) T(cx+8,sy,"Wi-Fi controller detected; driver unavailable",C_YELLOW,C_BASE);
         else T(cx+8,sy,"Wi-Fi unavailable",C_SUBTEXT,C_BASE); sy+=16;
-        if(g_radio.bluetooth_driver_ready) T(cx+8,sy,"Bluetooth ready",C_GREEN,C_BASE);
+        if(g_radio.bluetooth_connected) T(cx+8,sy,"Bluetooth connected",C_GREEN,C_BASE);
+        else if(g_radio.bluetooth_driver_ready) T(cx+8,sy,g_radio.bluetooth_enabled?"Bluetooth enabled; no device connected":"Bluetooth driver ready; radio disabled",C_YELLOW,C_BASE);
+        else if(g_radio.bluetooth_controller_present) T(cx+8,sy,"Bluetooth controller detected; HCI unavailable",C_YELLOW,C_BASE);
         else T(cx+8,sy,"Bluetooth HCI driver unavailable",C_SUBTEXT,C_BASE); sy+=16;
         uint32_t up=sched_uptime_ticks()/100;
         TF(cx+8,sy,C_TEXT,C_BASE,"Uptime  %uh %um %us",up/3600,(up/60)%60,up%60);
@@ -1274,11 +1342,15 @@ static void app_mouse_press(exp_win_t *w,int mx,int my){
         int bw=(cw2-44)/4,by=cy+92;if(inside(mx,my,cx+10,by,cw2-20,4*34)){int col=(mx-(cx+10))/(bw+8),row=(my-by)/34;if(col>=0&&col<4&&row>=0&&row<4){static const char keys[]={'7','8','9','/','4','5','6','*','1','2','3','-','0','C','=','+'};int k=keys[row*4+col];calc_key(w,k=='='?'\n':k);return;}}
     } else if(w->app==APP_TASKS){
         for(int i=0;i<5;i++)if(inside(mx,my,cx+10,cy+58+i*34,cw2-20,28)){w->todo_sel=i;w->todo_done[i]^=1;return;}
+    } else if(w->app==APP_CLOCK){
+        int bw=(cw2-44)/2,by=cy+204;if(inside(mx,my,cx+18,by,bw,28))stopwatch_toggle(w);else if(inside(mx,my,cx+26+bw,by,bw,28))stopwatch_reset(w);return;
     } else if(w->app==APP_MINES){
         int bx=cx+16,by=cy+48,cell=24;if(inside(mx,my,bx,by,10*cell,10*cell)){int gx=(mx-bx)/cell,gy=(my-by)/cell;w->mines.cursor_x=gx;w->mines.cursor_y=gy;mines_reveal(&w->mines,gx,gy);return;}
     } else if(w->app==APP_SNAKE){
         /* Four compact click controls below the board: left, up, down, right/restart. */
         int by=cy+44+14*16+12;if(inside(mx,my,cx+14,by,54,24))snake_key(w,KEY_LEFT);else if(inside(mx,my,cx+72,by,54,24))snake_key(w,KEY_UP);else if(inside(mx,my,cx+130,by,54,24))snake_key(w,KEY_DOWN);else if(inside(mx,my,cx+188,by,74,24)){if(w->snake.state)snake_key(w,'r');else snake_key(w,KEY_RIGHT);}return;
+    } else if(w->app==APP_PAINT){
+        int bx=cx+14,by=cy+60,cell=12;if(inside(mx,my,bx,by,EXP_PAINT_W*cell,EXP_PAINT_H*cell)){w->paint.cursor_x=(mx-bx)/cell;w->paint.cursor_y=(my-by)/cell;w->paint.pixels[w->paint.cursor_y][w->paint.cursor_x]=(uint8_t)w->paint.color;return;}
     } else if((w->app==APP_NOTEPAD||w->app==APP_JOURNAL)&&inside(mx,my,cx,cy+ch-16,cw2,16)){
         notepad_save(w);return;
     }
@@ -1328,7 +1400,7 @@ static void draw_about(exp_win_t *w){
 
 /* ─── Launcher ───────────────────────────────────────────── */
 static const struct{const char *name,*desc;app_id_t app;color32_t ic;}
-LA[16]={
+LA[17]={
     {"Terminal","Command workspace",APP_TERMINAL,RGB(0x48,0x6E,0x85)},
     {"Files",   "Local file browser",APP_FILES,RGB(0x8F,0x7A,0x3A)},
     {"Notepad", "Plain text editor",APP_NOTEPAD,RGB(0x44,0x76,0x4B)},
@@ -1338,15 +1410,16 @@ LA[16]={
     {"Tasks",   "Local checklist",APP_TASKS,RGB(0x43,0x72,0x69)},
     {"Journal", "Persistent daily notes",APP_JOURNAL,RGB(0x70,0x70,0x68)},
     {"Clock",   "Uptime and time",APP_CLOCK,RGB(0x38,0x38,0x34)},
-    {"Calendar","Manual month view",APP_CALENDAR,RGB(0x38,0x38,0x34)},
+    {"Calendar","RTC-backed month view",APP_CALENDAR,RGB(0x38,0x38,0x34)},
     {"About",   "System overview",APP_ABOUT,RGB(0x77,0x77,0x70)},
     {"TinyGL",  "Software 3D demo",APP_TINYGL,RGB(0x46,0x70,0x82)},
     {"Mines",   "GUI minesweeper",APP_MINES,RGB(0x52,0x52,0x4B)},
     {"Snake",   "GUI arcade snake",APP_SNAKE,RGB(0x44,0x76,0x4B)},
+    {"Paint",   "Local pixel canvas",APP_PAINT,RGB(0x9A,0x58,0x50)},
     {"Viewer",  "Text and image viewer",APP_VIEWER,RGB(0x60,0x75,0x8B)},
     {"ArchiveEx", "Validated TAR.ZST/ATPK installer",APP_ARCHIVEEX,RGB(0x7B,0x66,0x28)},
 };
-#define NLA 16
+#define NLA 17
 #define LA_COLS 2
 #define LA_ROWS ((NLA+LA_COLS-1)/LA_COLS)
 
@@ -1465,10 +1538,10 @@ int exp_open_app(app_id_t app, const char *path){
         w->ed_dirty=0; notepad_load(w); break;
     case APP_CLOCK:
         kstrcpy(w->title,"Clock");
-        w->w=340; w->h=240; break;
+        w->w=380; w->h=300;w->stopwatch_started_tick=sched_uptime_ticks(); break;
     case APP_CALENDAR:
-        kstrcpy(w->title,"Calendar (manual)");
-        w->cal_year=2026;w->cal_month=1;w->w=390;w->h=300;break;
+        kstrcpy(w->title,"Calendar");
+        w->cal_year=0;w->cal_month=0;w->cal_follow_today=1;w->w=390;w->h=300;break;
     case APP_TINYGL:
         kstrcpy(w->title,"TinyGL Cube (software)");
         w->tinygl_scene=0;w->w=520;w->h=400;break;
@@ -1478,6 +1551,9 @@ int exp_open_app(app_id_t app, const char *path){
     case APP_SNAKE:
         kstrcpy(w->title,"Snake");
         w->w=380; w->h=330; snake_init(w); break;
+    case APP_PAINT:
+        kstrcpy(w->title,"Paint");
+        w->w=430; w->h=355; paint_init(w); break;
     case APP_ABOUT:
         kstrcpy(w->title,"About");
         w->w=440; w->h=340; break;
@@ -1607,6 +1683,7 @@ static void draw_win_content(exp_win_t *w){
     case APP_TINYGL:   draw_tinygl_app(w);break;
     case APP_MINES:    draw_mines_app(w);break;
     case APP_SNAKE:    draw_snake_app(w);break;
+    case APP_PAINT:    draw_paint_app(w);break;
     case APP_IMAGE_VIEWER: draw_image_viewer(w);break;
     case APP_VIEWER: if(w->image_path[0]) draw_image_viewer(w); else draw_editor(w); break;
     case APP_ARCHIVEEX: draw_archiveex(w); break;
@@ -1799,9 +1876,11 @@ void exp_run(void){
             case APP_SETTINGS: settings_key(w,k); break;
             case APP_CALCULATOR: calc_key(w,k); break;
             case APP_TASKS:    tasks_key(w,k); break;
+            case APP_CLOCK:    clock_key(w,k); break;
             case APP_CALENDAR: calendar_key(w,k); break;
             case APP_MINES:    mines_key(w,k); break;
             case APP_SNAKE:    snake_key(w,k); break;
+            case APP_PAINT:    paint_key(w,k); break;
             case APP_TINYGL:   tinygl_key(w,k); break;
             case APP_IMAGE_VIEWER: image_viewer_key(w,k); break;
             case APP_EXTERNAL:

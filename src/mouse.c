@@ -37,12 +37,26 @@ static int wait_input_clear(void) {
     return 0;
 }
 
+/* Controller replies (such as the configuration byte) must not consume a
+ * stale AUX packet.  Real controllers can retain boot-time bytes in OBF. */
 static int wait_output_byte(uint8_t *out) {
     for (int i=0;i<100000;i++) {
-        if (inb(PS2_STATUS)&PS2_ST_OUTPUT) { *out=inb(PS2_DATA); return 1; }
+        uint8_t status=inb(PS2_STATUS);
+        if (status&PS2_ST_OUTPUT) {
+            uint8_t value=inb(PS2_DATA);
+            if (!(status&PS2_ST_AUX)) { *out=value; return 1; }
+            g_mouse.controller_drained++;
+        }
         __asm__ volatile("pause");
     }
     return 0;
+}
+static void drain_output_buffer(void){
+    for(int i=0;i<32;i++){
+        uint8_t status=inb(PS2_STATUS);
+        if(!(status&PS2_ST_OUTPUT))break;
+        (void)inb(PS2_DATA);g_mouse.controller_drained++;
+    }
 }
 
 static int wait_aux_byte(uint8_t *out) {
@@ -51,6 +65,7 @@ static int wait_aux_byte(uint8_t *out) {
         if (status&PS2_ST_OUTPUT) {
             uint8_t value=inb(PS2_DATA);
             if (status&PS2_ST_AUX) { *out=value; return 1; }
+            g_mouse.controller_drained++;
         }
         __asm__ volatile("pause");
     }
@@ -83,11 +98,15 @@ static int mouse_command(uint8_t value) {
 static void mouse_irq(registers_t *r) {
     (void)r;
     uint8_t status=inb(PS2_STATUS);
-    if (!(status&PS2_ST_OUTPUT) || !(status&PS2_ST_AUX)) return;
+    if (!(status&PS2_ST_OUTPUT)) return;
+    /* Always consume OBF inside IRQ12.  Some physical controllers briefly
+     * lose the AUX status bit; leaving the byte unread wedges the PS/2 port. */
     uint8_t byte=inb(PS2_DATA);
+    if (!(status&PS2_ST_AUX)) { g_mouse.controller_drained++; return; }
+    g_mouse.irq_bytes++;
 
     /* Packet byte zero always has bit 3 set.  Re-synchronise after noise. */
-    if (g_packet_pos==0 && !(byte&0x08)) return;
+    if (g_packet_pos==0 && !(byte&0x08)) { g_mouse.sync_losses++; return; }
     g_packet[g_packet_pos++]=byte;
     if (g_packet_pos<3) return;
     g_packet_pos=0;
@@ -114,6 +133,9 @@ void mouse_init(int screen_w, int screen_h) {
 
     /* No controller reply must block boot: absence simply disables the cursor. */
     cpu_cli();
+    /* Discard stale POST/controller bytes before issuing a read-config
+     * command.  Treating one as the config byte can mask IRQ12 on hardware. */
+    drain_output_buffer();
     if (!controller_write(PS2_CMD_ENABLE_AUX)) { g_mouse.init_status=MOUSE_INIT_ENABLE_AUX; cpu_sti(); return; }
 
     uint8_t cfg=0;
@@ -124,6 +146,7 @@ void mouse_init(int screen_w, int screen_h) {
     cfg&=(uint8_t)~0x20; /* enable auxiliary clock */
     if (!controller_write(PS2_CMD_WRITE_CFG) || !wait_input_clear()) { g_mouse.init_status=MOUSE_INIT_WRITE_CFG; cpu_sti(); return; }
     outb(PS2_DATA,cfg);
+    if (!wait_input_clear()) { g_mouse.init_status=MOUSE_INIT_WRITE_CFG; cpu_sti(); return; }
 
     if (!mouse_command(MOUSE_CMD_DEFAULTS)) { g_mouse.init_status=MOUSE_INIT_DEFAULTS; cpu_sti(); return; }
     if (!mouse_command(MOUSE_CMD_ENABLE)) { g_mouse.init_status=MOUSE_INIT_ENABLE; cpu_sti(); return; }

@@ -373,6 +373,39 @@ isr_common_stub:
     addq $16, %rsp           /* pop int_no + err_code */
     iretq
 
+/* ── Linux-shaped x86-64 syscall entry ───────────────────────
+ * The CPU supplies RCX=user RIP and R11=user RFLAGS. Build the same
+ * registers_t layout as the int $0x80 path on the current task's known
+ * kernel stack, dispatch only through linux_syscall_dispatch(), then IRETQ
+ * to preserve the existing scheduler/user-return model. RCX/R11 remain
+ * syscall-clobbered as required by the Linux x86-64 ABI. */
+.global linux_syscall_entry
+.extern linux_syscall_dispatch
+.extern linux_kernel_stack_top
+.extern linux_saved_user_rsp
+linux_syscall_entry:
+    cli
+    movq %rsp,linux_saved_user_rsp(%rip)
+    movq linux_kernel_stack_top(%rip),%rsp
+    pushq $0x23
+    pushq linux_saved_user_rsp(%rip)
+    pushq %r11
+    pushq $0x1b
+    pushq %rcx
+    pushq $0
+    pushq $128
+    pushq %rax; pushq %rcx; pushq %rdx; pushq %rsi
+    pushq %rdi; pushq %r8;  pushq %r9;  pushq %r10; pushq %r11
+    pushq %rbx; pushq %rbp; pushq %r12; pushq %r13; pushq %r14; pushq %r15
+    movq %rsp,%rdi
+    call linux_syscall_dispatch
+    movq %rax,112(%rsp)
+    popq %r15; popq %r14; popq %r13; popq %r12; popq %rbp; popq %rbx
+    popq %r11; popq %r10; popq %r9;  popq %r8
+    popq %rdi; popq %rsi; popq %rdx; popq %rcx; popq %rax
+    addq $16,%rsp
+    iretq
+
 /* ── Common IRQ stub (64-bit) ────────────────────────────── */
 .extern irq_handler
 irq_common_stub:

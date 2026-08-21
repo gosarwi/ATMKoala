@@ -3,17 +3,14 @@
 
 #include <stdint.h>
 
-/* ATM static-native process entry layout, v0.9.
- * The loader currently provides argc=0, argv=NULL, envp=NULL and an auxv
- * terminator. CRT keeps the System V-aligned stack contract while leaving
- * future execve argument marshalling backward-compatible. */
-typedef struct atm_start_stack {
-    uint64_t argc;
-    char   **argv;
-    char   **envp;
-    uint64_t auxv_type;
-    uint64_t auxv_value;
-} atm_start_stack_t;
+/* ATM static-native process entry stack, v0.9.
+ * At the initial RSP: argc, argv[0..argc-1], NULL, envp[0..n-1], NULL,
+ * then auxiliary-vector type/value pairs. The current launcher provides
+ * argc=1 with argv[0] set to the bounded spawn name, an empty envp, and
+ * AT_PAGESZ, AT_ENTRY and AT_NULL. */
+#define ATM_AUXV_AT_NULL    0ULL
+#define ATM_AUXV_AT_PAGESZ  6ULL
+#define ATM_AUXV_AT_ENTRY   9ULL
 
 __attribute__((noreturn)) void __atm_libc_start_main(uint64_t *stack);
 

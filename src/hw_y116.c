@@ -22,6 +22,7 @@ edp_panel_t    g_panel   = {0};
 pci_bus_t      g_pci     = {0};
 rtl8168_state_t g_rtl8168= {0};
 hpet_state_t   g_hpet    = {0};
+hda_state_t    g_hda     = {0};
 i915_fb_t      g_i915    = {0};
 
 /* ── Port I/O ────────────────────────────────────────────── */
@@ -74,47 +75,28 @@ static void pci_enable_device(uint8_t bus, uint8_t dev, uint8_t fn) {
     pci_write_cfg(bus, dev, fn, 0x04, cmd);
 }
 
-void pci_init(pci_bus_t *bus) {
-    bus->count = 0;
-    /* Scan bus 0 (where all J4105 devices live) plus a few more */
-    for (int b = 0; b < 4 && bus->count < PCI_MAX_DEVICES; b++) {
-        for (int d = 0; d < 32 && bus->count < PCI_MAX_DEVICES; d++) {
-            for (int f = 0; f < 8 && bus->count < PCI_MAX_DEVICES; f++) {
-                uint32_t id = pci_read_cfg((uint8_t)b, (uint8_t)d, (uint8_t)f, 0x00);
-                uint16_t vendor = (uint16_t)(id & 0xFFFF);
-                if (vendor == 0xFFFF || vendor == 0x0000) {
-                    if (f == 0) break; /* skip rest of device */
-                    continue;
-                }
-                uint16_t device = (uint16_t)(id >> 16);
-                uint32_t cc     = pci_read_cfg((uint8_t)b, (uint8_t)d, (uint8_t)f, 0x08);
-                uint32_t irq_r  = pci_read_cfg((uint8_t)b, (uint8_t)d, (uint8_t)f, 0x3C);
-
-                pci_device_t *p = &bus->devs[bus->count++];
-                p->vendor    = vendor;
-                p->device    = device;
-                p->bus       = (uint8_t)b;
-                p->dev       = (uint8_t)d;
-                p->fn        = (uint8_t)f;
-                p->class_code= (uint8_t)(cc >> 24);
-                p->subclass  = (uint8_t)(cc >> 16);
-                p->prog_if   = (uint8_t)(cc >>  8);
-                p->revision  = (uint8_t)(cc      );
-                p->irq       = (uint8_t)(irq_r     );
-                p->pin       = (uint8_t)(irq_r >> 8);
-                p->valid     = 1;
-                /* Read BARs */
-                for (int bar = 0; bar < 6; bar++)
-                    p->bar[bar] = pci_read_cfg((uint8_t)b,(uint8_t)d,(uint8_t)f,
-                                               (uint8_t)(0x10 + bar*4));
-                /* Only scan fn0 unless multi-function */
-                if (f == 0) {
-                    uint32_t hdr = pci_read_cfg((uint8_t)b,(uint8_t)d,(uint8_t)f, 0x0C);
-                    if (!((hdr >> 16) & 0x80)) break;
-                }
-            }
+static void pci_scan_bus(pci_bus_t *bus,uint8_t busno,uint8_t seen[256]){
+    if(!bus||seen[busno]||bus->count>=PCI_MAX_DEVICES)return;
+    seen[busno]=1;
+    for(int d=0;d<32&&bus->count<PCI_MAX_DEVICES;d++){
+        for(int f=0;f<8&&bus->count<PCI_MAX_DEVICES;f++){
+            uint32_t id=pci_read_cfg(busno,(uint8_t)d,(uint8_t)f,0x00);uint16_t vendor=(uint16_t)id;
+            if(vendor==0xFFFF||vendor==0x0000){if(f==0)break;continue;}
+            uint16_t device=(uint16_t)(id>>16);uint32_t cc=pci_read_cfg(busno,(uint8_t)d,(uint8_t)f,0x08),irq_r=pci_read_cfg(busno,(uint8_t)d,(uint8_t)f,0x3C);
+            pci_device_t *p=&bus->devs[bus->count++];p->vendor=vendor;p->device=device;p->bus=busno;p->dev=(uint8_t)d;p->fn=(uint8_t)f;p->class_code=(uint8_t)(cc>>24);p->subclass=(uint8_t)(cc>>16);p->prog_if=(uint8_t)(cc>>8);p->revision=(uint8_t)cc;p->irq=(uint8_t)irq_r;p->pin=(uint8_t)(irq_r>>8);p->valid=1;
+            for(int bar=0;bar<6;bar++)p->bar[bar]=pci_read_cfg(busno,(uint8_t)d,(uint8_t)f,(uint8_t)(0x10+bar*4));
+            /* Scan a PCI-to-PCI bridge's secondary bus. This covers common
+             * UEFI laptop topology where NVMe/xHCI sit behind root ports. */
+            if(p->class_code==0x06&&p->subclass==0x04){uint32_t buses=pci_read_cfg(busno,(uint8_t)d,(uint8_t)f,0x18);uint8_t secondary=(uint8_t)(buses>>8);if(secondary&&secondary!=busno)pci_scan_bus(bus,secondary,seen);}
+            if(f==0){uint32_t hdr=pci_read_cfg(busno,(uint8_t)d,0,0x0C);if(!((hdr>>16)&0x80))break;}
         }
     }
+}
+void pci_init(pci_bus_t *bus) {
+    uint8_t seen[256];if(!bus)return;kmemset(seen,0,sizeof(seen));bus->count=0;
+    /* Preserve low-bus compatibility while recursively following bridge
+     * secondaries rather than silently stopping at bus 3. */
+    for(uint8_t root=0;root<4&&bus->count<PCI_MAX_DEVICES;root++)pci_scan_bus(bus,root,seen);
 }
 
 pci_device_t *pci_find(pci_bus_t *bus, uint16_t vendor, uint16_t device) {
@@ -142,6 +124,44 @@ void radio_detect(radio_status_t *radio, const pci_bus_t *bus) {
     }
     /* Bluetooth needs USB enumeration plus HCI transport support. Do not mark
      * it present merely because a USB host controller exists. */
+}
+
+int hardware_status_selftest(void){
+    pci_bus_t bus;radio_status_t radio;battery_info_t battery;kmemset(&bus,0,sizeof(bus));
+    bus.count=2;bus.devs[0].class_code=0x02;bus.devs[0].subclass=0x80;bus.devs[0].vendor=0x8086;bus.devs[0].device=0x24FD;
+    bus.devs[1].class_code=0x0C;bus.devs[1].subclass=0x03;bus.devs[1].prog_if=0x30;
+    radio_detect(&radio,&bus);battery_init(&battery);
+    if(!radio.wifi_controller_present||radio.wifi_driver_ready||radio.wifi_connected||radio.wifi_signal_pct||!radio.usb_host_present||radio.bluetooth_controller_present||radio.bluetooth_driver_ready)return -1;
+    return (!battery.valid&&!battery.present)?0:-1;
+}
+
+/* Intel HD Audio controller discovery. No controller register writes occur
+ * here: usable playback also needs CORB/RIRB command handling, codec verbs,
+ * buffer descriptors, stream DMA, IRQ handling and a PCM mixer. */
+void hda_detect(hda_state_t *audio,const pci_bus_t *bus){
+    if(!audio)return;kmemset(audio,0,sizeof(*audio));if(!bus)return;
+    for(int i=0;i<bus->count;i++){
+        const pci_device_t *p=&bus->devs[i];
+        if(!((p->class_code==0x04&&p->subclass==0x03)||(p->vendor==PCI_VENDOR_INTEL&&p->device==PCI_DEV_GEMINI_HDA)))continue;
+        audio->controller_present=1;audio->vendor=p->vendor;audio->device=p->device;
+        audio->mmio_base=(uint64_t)(p->bar[0]&~0xFu);
+        /* Read-only register inspection is intentionally deferred until a
+         * mapped MMIO policy exists for arbitrary PCI BARs. */
+        return;
+    }
+}
+void hda_print(const hda_state_t *audio){
+    char buf[96];terminal_set_color(VGA_LIGHT_CYAN,VGA_BLACK);terminal_writeln("Audio:");terminal_set_color(VGA_LIGHT_GREY,VGA_BLACK);
+    if(!audio||!audio->controller_present){terminal_writeln("  No Intel HD Audio controller detected");return;}
+    ksnprintf(buf,sizeof(buf),"  HDA controller: %04x:%04x  MMIO %08x",audio->vendor,audio->device,(uint32_t)audio->mmio_base);terminal_writeln(buf);
+    terminal_writeln("  PCM output unavailable: codec/DMA driver not installed");
+}
+int hda_selftest(void){
+    pci_bus_t bus;hda_state_t audio;kmemset(&bus,0,sizeof(bus));
+    bus.count=1;bus.devs[0].vendor=PCI_VENDOR_INTEL;bus.devs[0].device=PCI_DEV_GEMINI_HDA;
+    bus.devs[0].class_code=0x04;bus.devs[0].subclass=0x03;bus.devs[0].bar[0]=0xFEBF1000u;
+    hda_detect(&audio,&bus);
+    return audio.controller_present&&audio.vendor==PCI_VENDOR_INTEL&&audio.device==PCI_DEV_GEMINI_HDA&&audio.mmio_base==0xFEBF1000u&&!audio.pcm_output_ready?0:-1;
 }
 
 /* Class code names */
@@ -686,54 +706,51 @@ void edp_print(const edp_panel_t *panel) {
  *  and expose the MMIO space for backlight/power management.
  * ════════════════════════════════════════════════════════════ */
 
-int i915_fb_init(i915_fb_t *fb, uint64_t phys, uint32_t w,
-                  uint32_t h, uint32_t pitch, uint8_t bpp) {
-    fb->fb_phys    = phys;
-    fb->fb_virt    = (uint8_t *)(uintptr_t)phys; /* identity-mapped */
-    fb->width      = w;
-    fb->height     = h;
-    fb->pitch      = pitch;
-    fb->bpp        = bpp;
-    fb->pci_devid  = PCI_DEV_UHD600;
-
-    /* Find GPU MMIO base from PCI BAR0 */
-    pci_device_t *gpu = pci_find(&g_pci, PCI_VENDOR_INTEL, PCI_DEV_UHD600);
-    if (gpu) {
-        /* BAR0 = 64-bit MMIO (GTT aperture), BAR2 = MMIO registers */
-        uint64_t bar2 = (uint64_t)(gpu->bar[2] & ~0xFu);
-        if (bar2 > 0x1000) {
-            fb->mmio_base  = bar2;
-            /* Stolen VRAM: read from host bridge config */
-            uint32_t gmch = pci_read_cfg(0, 0, 0, 0x50);
-            uint32_t stolen_code = (gmch >> 4) & 0xF;
-            /* Gemini Lake stolen memory encoding */
-            uint32_t stolen_mb_table[] = {0,32,64,96,128,160,192,224,
-                                           256,288,320,352,384,416,448,512};
-            fb->stolen_mb = stolen_mb_table[stolen_code & 0xF];
-        }
-        pci_enable_device(gpu->bus, gpu->dev, gpu->fn);
+void i915_detect(i915_fb_t *fb,const pci_bus_t *bus) {
+    static const uint32_t stolen_mb_table[16]={0,32,64,96,128,160,192,224,256,288,320,352,384,416,448,512};
+    if(!fb)return;
+    fb->pci_present=0;fb->native_modeset_ready=0;fb->acceleration_ready=0;fb->pci_devid=0;fb->mmio_base=0;fb->stolen_mb=0;
+    if(!bus)return;
+    for(int i=0;i<bus->count;i++){
+        const pci_device_t *gpu=&bus->devs[i];
+        if(gpu->vendor!=PCI_VENDOR_INTEL||gpu->device!=PCI_DEV_UHD600)continue;
+        fb->pci_present=1;fb->pci_devid=PCI_DEV_UHD600;fb->pci_bus=gpu->bus;fb->pci_dev=gpu->dev;fb->pci_fn=gpu->fn;
+        /* BAR2 is recorded only as firmware-provided diagnostic metadata. No
+         * BAR is mapped or written by this discovery-only implementation. */
+        fb->mmio_base=(uint64_t)(gpu->bar[2]&~0xFu);
+        if(bus==&g_pci){uint32_t gmch=pci_read_cfg(0,0,0,0x50);fb->stolen_mb=stolen_mb_table[(gmch>>4)&0xFu];}
+        return;
     }
-
-    fb->initialized = 1;
-    return 0;
 }
 
-void i915_fb_fill(i915_fb_t *fb, uint32_t color) {
-    if (!fb->initialized || !fb->fb_virt) return;
-    uint32_t *p = (uint32_t *)fb->fb_virt;
-    uint32_t count = (fb->pitch * fb->height) / 4;
-    for (uint32_t i = 0; i < count; i++) p[i] = color;
+int i915_fb_init(i915_fb_t *fb,uint64_t phys,uint32_t w,uint32_t h,uint32_t pitch,uint8_t bpp) {
+    if(!fb||!phys||!w||!h||!pitch||(bpp!=24&&bpp!=32))return -1;
+    fb->fb_phys=phys;fb->fb_virt=(uint8_t *)(uintptr_t)phys;fb->width=w;fb->height=h;fb->pitch=pitch;fb->bpp=bpp;
+    /* This is a bootloader framebuffer handoff, not native i915 modesetting. */
+    fb->initialized=1;return 0;
 }
 
-void i915_fb_blit(i915_fb_t *fb, uint32_t x, uint32_t y,
-                   uint32_t w, uint32_t h, const uint32_t *pixels) {
-    if (!fb->initialized || !fb->fb_virt) return;
-    for (uint32_t row = 0; row < h && (y + row) < fb->height; row++) {
-        uint32_t *dst = (uint32_t *)(fb->fb_virt +
-                        (y + row) * fb->pitch + x * (fb->bpp / 8));
-        const uint32_t *src = pixels + row * w;
-        for (uint32_t col = 0; col < w && (x + col) < fb->width; col++)
-            dst[col] = src[col];
+int i915_selftest(void){
+    pci_bus_t bus;i915_fb_t fb;kmemset(&bus,0,sizeof(bus));kmemset(&fb,0,sizeof(fb));
+    bus.count=1;bus.devs[0].vendor=PCI_VENDOR_INTEL;bus.devs[0].device=PCI_DEV_UHD600;bus.devs[0].bus=0;bus.devs[0].dev=2;bus.devs[0].fn=0;bus.devs[0].class_code=3;bus.devs[0].bar[2]=0xDEA00000u;
+    i915_detect(&fb,&bus);
+    if(!fb.pci_present||fb.pci_devid!=PCI_DEV_UHD600||fb.mmio_base!=0xDEA00000u||fb.native_modeset_ready||fb.acceleration_ready)return -1;
+    if(i915_fb_init(&fb,0xE0000000u,640,480,2560,32)<0||!fb.initialized||fb.width!=640||fb.height!=480)return -1;
+    return i915_fb_init(&fb,0,640,480,2560,32)<0?0:-1;
+}
+
+void i915_fb_fill(i915_fb_t *fb,uint32_t color){
+    if(!fb||!fb->initialized||!fb->fb_virt||fb->bpp!=32)return;
+    uint32_t *p=(uint32_t *)fb->fb_virt;uint32_t count=(fb->pitch*fb->height)/4u;
+    for(uint32_t i=0;i<count;i++)p[i]=color;
+}
+
+void i915_fb_blit(i915_fb_t *fb,uint32_t x,uint32_t y,uint32_t w,uint32_t h,const uint32_t *pixels){
+    if(!fb||!fb->initialized||!fb->fb_virt||!pixels||fb->bpp!=32||x>=fb->width||y>=fb->height)return;
+    uint32_t copy_w=w<fb->width-x?w:fb->width-x,copy_h=h<fb->height-y?h:fb->height-y;
+    for(uint32_t row=0;row<copy_h;row++){
+        uint32_t *dst=(uint32_t *)(fb->fb_virt+(y+row)*fb->pitch+x*4u);const uint32_t *src=pixels+row*w;
+        kmemcpy(dst,src,copy_w*4u);
     }
 }
 
@@ -932,22 +949,25 @@ void hw_y116_init(void) {
     /* 2. Presence discovery for WLAN and USB transport. */
     radio_detect(&g_radio, &g_pci);
 
-    /* 3. CPU */
+    /* 3. Read-only HDA controller discovery. */
+    hda_detect(&g_hda,&g_pci);
+
+    /* 4. CPU */
     cpu_detect(&g_cpu);
 
-    /* 4. HPET */
+    /* 5. HPET */
     hpet_init(&g_hpet);
 
-    /* 5. Battery */
+    /* 6. Battery */
     battery_init(&g_battery);
 
-    /* 6. eDP panel */
+    /* 7. eDP panel */
     edp_detect(&g_panel);
 
-    /* 7. RTL8168 (supplements existing RTL8139 stub) */
+    /* 8. RTL8168 (supplements existing RTL8139 stub) */
     rtl8168_init(&g_rtl8168, &g_pci);
 
-    /* 8. Backlight (needs i915 MMIO which may be set by vbe_init) */
+    /* 9. Backlight (needs i915 MMIO which may be set by vbe_init) */
     backlight_init(&g_backlight);
 }
 
@@ -956,13 +976,14 @@ static void radio_print(const radio_status_t *radio) {
     terminal_set_color(VGA_LIGHT_CYAN, VGA_BLACK);
     terminal_writeln("Radios:");
     terminal_set_color(VGA_LIGHT_GREY, VGA_BLACK);
-    if (radio->wifi_controller_present) {
-        ksnprintf(buf,sizeof(buf),"  Wi-Fi    : controller %04x:%04x; driver %s",
-                  radio->wifi_vendor,radio->wifi_device,radio->wifi_driver_ready?"ready":"not installed");
-        terminal_writeln(buf);
+    if (radio->wifi_connected) {
+        ksnprintf(buf,sizeof(buf),"  Wi-Fi    : connected; signal %u%%",radio->wifi_signal_pct);terminal_writeln(buf);
+    } else if (radio->wifi_controller_present) {
+        ksnprintf(buf,sizeof(buf),"  Wi-Fi    : controller %04x:%04x; %s",radio->wifi_vendor,radio->wifi_device,radio->wifi_driver_ready?"driver ready, not associated":"driver unavailable");terminal_writeln(buf);
     } else terminal_writeln("  Wi-Fi    : no PCI wireless controller detected");
-    if (radio->bluetooth_controller_present)
-        terminal_writeln(radio->bluetooth_driver_ready?"  Bluetooth: HCI driver ready":"  Bluetooth: controller found; HCI driver not installed");
+    if (radio->bluetooth_connected) terminal_writeln("  Bluetooth: connected");
+    else if (radio->bluetooth_controller_present)
+        terminal_writeln(radio->bluetooth_driver_ready?(radio->bluetooth_enabled?"  Bluetooth: enabled; no device connected":"  Bluetooth: driver ready; radio disabled"):"  Bluetooth: controller found; HCI driver unavailable");
     else terminal_writeln(radio->usb_host_present?"  Bluetooth: no enumerated USB HCI controller":"  Bluetooth: USB transport unavailable");
 }
 
@@ -972,6 +993,8 @@ void hw_y116_print(void) {
     battery_print(&g_battery);
     terminal_writeln("");
     radio_print(&g_radio);
+    terminal_writeln("");
+    hda_print(&g_hda);
     terminal_writeln("");
     edp_print(&g_panel);
     terminal_writeln("");

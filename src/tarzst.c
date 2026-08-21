@@ -1,6 +1,8 @@
 #include "tarzst.h"
 #include "vfs.h"
 #include "config.h"
+#include "http_client.h"
+#include "kmalloc.h"
 #include "util.h"
 #include "vga.h"
 #include <stdint.h>
@@ -106,6 +108,73 @@ static int install_atpk(const tzst_pkg_t *pkg){
 
 int tzst_install(const tzst_pkg_t *pkg){if(!pkg||!pkg->tar)return -1;return pkg->atpk?install_atpk(pkg):install_legacy(pkg);}
 int tzst_remove(const char *name){const char*inst=cfg_get(&g_pkgcfg,name,"installed");if(!inst||kstrcmp(inst,"yes"))return -1;cfg_set(&g_pkgcfg,name,"installed","no");cfg_save(&g_pkgcfg,CFG_ROOT "/packages.conf");terminal_write("pkg: removed registry metadata for ");terminal_writeln(name);return 0;}
+
+static int package_cache_prepare(void){
+    vfs_stat_t st;
+    if(vfs_mkdir("/uiu",0755)<0&&vfs_stat("/uiu",&st)<0)return -1;
+    if(vfs_mkdir("/uiu/cache",0755)<0&&vfs_stat("/uiu/cache",&st)<0)return -1;
+    if(vfs_mkdir("/uiu/cache/packages",0755)<0&&vfs_stat("/uiu/cache/packages",&st)<0)return -1;
+    return 0;
+}
+/* Remote package intake deliberately differs from local compatibility install:
+ * it accepts only ATPK with control+manifest. HTTP remains transport only;
+ * integrity inside the archive is verified by tzst_parse/tzst_install before
+ * payload paths are committed. */
+int tzst_fetch_install_http(const char *url){
+    uint8_t *body=(uint8_t *)kmalloc(ATM_HTTP_RESPONSE_MAX);atm_http_response_t response;tzst_pkg_t pkg;
+    char stage[128],final[128];vfs_stat_t st;int fd=-1,rc=-1;
+    if(!body)return -1;
+    if(atm_http_get(url,body,ATM_HTTP_RESPONSE_MAX,&response)<0)goto done;
+    if(!response.body_length||tzst_parse(&pkg,body,response.body_length)<0||!pkg.atpk)goto done;
+    if(package_cache_prepare()<0)goto done;
+    kstrcpy(final,"/uiu/cache/packages/");kstrcat(final,pkg.package_name);kstrcat(final,".atpk");
+    if(kstrlen(final)+10>=sizeof(stage)||vfs_stat(final,&st)==0)goto done;
+    kstrcpy(stage,final);kstrcat(stage,".download");
+    fd=vfs_open(stage,O_WRONLY|O_CREAT|O_EXCL,0600);
+    if(fd<0||vfs_write(fd,body,response.body_length)!=(int64_t)response.body_length)goto done;
+    vfs_close(fd);fd=-1;
+    if(vfs_rename(stage,final)<0){(void)vfs_unlink(stage);goto done;}
+    rc=tzst_install(&pkg);
+done:
+    if(fd>=0){vfs_close(fd);(void)vfs_unlink(stage);}kfree(body);return rc;
+}
+
+static int valid_repo_url(const char *url){
+    uint32_t n;if(!url||kstrncmp(url,"http://",7)!=0)return 0;n=(uint32_t)kstrlen(url);
+    if(n<=7||n>=ATM_HTTP_URL_MAX)return 0;
+    for(uint32_t i=0;i<n;i++)if((uint8_t)url[i]<=0x20||url[i]=='#'||url[i]=='?')return 0;
+    return 1;
+}
+const char *tzst_repo_url(void){
+    const char *url=cfg_get(&g_pkgcfg,"repository","url");
+    return valid_repo_url(url)?url:NULL;
+}
+int tzst_repo_set_url(const char *url){
+    char normalized[ATM_HTTP_URL_MAX+1];uint32_t n;
+    if(!valid_repo_url(url))return -1;n=(uint32_t)kstrlen(url);
+    while(n>7&&url[n-1]=='/')n--;if(!n)return -1;
+    kmemcpy(normalized,url,n);normalized[n]=0;
+    cfg_set(&g_pkgcfg,"repository","url",normalized);
+    return cfg_save(&g_pkgcfg,CFG_ROOT "/packages.conf");
+}
+static int repo_build_url(const char *base,const char *pkg_name,char *url,uint32_t cap){
+    uint32_t n;if(!base||!url||!cap||!valid_repo_url(base)||!valid_pkg_name(pkg_name))return -1;
+    n=(uint32_t)kstrlen(base);if(n+1u+(uint32_t)kstrlen(pkg_name)+5u>=cap)return -1;
+    kstrcpy(url,base);kstrcat(url,"/");kstrcat(url,pkg_name);kstrcat(url,".atpk");return 0;
+}
+int tzst_repo_fetch_package(const char *pkg_name){
+    const char *base=tzst_repo_url();char url[ATM_HTTP_URL_MAX+1];
+    if(repo_build_url(base,pkg_name,url,sizeof(url))<0)return -1;
+    return tzst_fetch_install_http(url);
+}
+int tzst_repo_selftest(void){
+    char url[ATM_HTTP_URL_MAX+1];
+    if(!valid_repo_url("http://127.0.0.1:8080/atpk")||valid_repo_url("https://repo.invalid")||
+       valid_repo_url("http://repo.invalid/a?b")||valid_repo_url("http://repo.invalid/a b"))return -1;
+    if(repo_build_url("http://repo.test/base","demo-app",url,sizeof(url))<0||kstrcmp(url,"http://repo.test/base/demo-app.atpk"))return -1;
+    if(repo_build_url("http://repo.test/base","../bad",url,sizeof(url))==0)return -1;
+    return 0;
+}
 
 static uint32_t tar_write_file(uint8_t *tar,uint32_t cap,uint32_t pos,const char *name,const uint8_t *data,uint32_t size){uint32_t next=pos+TAR_BLOCK+align512(size);if(next>cap||!tar_safe_name(name))return 0;uint8_t*h=tar+pos;kmemset(h,0,TAR_BLOCK);kstrncpy((char*)h,name,99);tar_octal_write(h+100,8,0755);tar_octal_write(h+124,12,size);h[156]='0';kmemcpy(h+257,"ustar",5);h[262]='0';h[263]='0';kmemcpy(tar+pos+TAR_BLOCK,data,size);return next;}
 int tzst_wrap_elf(const uint8_t *elf,uint32_t es,const char *name,const char *ver,uint8_t*out,uint32_t cap){

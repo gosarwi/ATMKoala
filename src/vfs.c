@@ -1342,6 +1342,16 @@ vfs_dirent_t *vfs_readdir_next(DIR_t *dir) {
     return &g_dirent_buf;
 }
 
+int vfs_fd_readdir(int fd,vfs_dirent_t *out){
+    if(fd<0||fd>=FD_MAX||!out||!g_fds[fd].used||!g_fds[fd].inode) return -1;
+    vfs_inode_t *inode=g_fds[fd].inode;
+    if(!S_ISDIR(inode->mode)||!inode->ops||!inode->ops->readdir||vfs_require(inode,PERM_R|PERM_X)<0) return -1;
+    if(g_fds[fd].offset>0xffffffffULL) return 0;
+    if(inode->ops->readdir(inode,(uint32_t)g_fds[fd].offset,out)!=0) return 0;
+    g_fds[fd].offset++;
+    return 1;
+}
+
 void vfs_closedir(DIR_t *dir) {
     if (dir) kfree(dir);
 }

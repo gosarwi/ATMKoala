@@ -290,6 +290,9 @@ int          vfs_create (const char *path, uint32_t mode);
 /* Directory iteration */
 DIR_t       *vfs_opendir (const char *path);
 vfs_dirent_t*vfs_readdir_next(DIR_t *dir);
+/* Reads one directory entry through an already open VFS directory fd and
+ * advances that fd’s private offset. */
+int          vfs_fd_readdir(int fd,vfs_dirent_t *out);
 void         vfs_closedir(DIR_t *dir);
 
 /* Legacy compat */

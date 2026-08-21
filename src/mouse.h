@@ -11,6 +11,9 @@ typedef struct {
     volatile int available;
     volatile uint32_t packets;
     volatile uint32_t dropped_packets;
+    volatile uint32_t irq_bytes;
+    volatile uint32_t sync_losses;
+    volatile uint32_t controller_drained;
     volatile uint8_t init_status;
 } mouse_state_t;
 

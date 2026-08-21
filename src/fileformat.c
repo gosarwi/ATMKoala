@@ -3,6 +3,7 @@
 #include "vga.h"
 #include "vbe.h"
 #include "util.h"
+#include "mp3.h"
 #include <stdint.h>
 #include <stddef.h>
 
@@ -30,6 +31,8 @@ file_fmt_t fmt_detect(const uint8_t *buf, uint32_t size, const char *fn) {
         if (buf[0]==0xFF && buf[1]==0xD8 && buf[2]==0xFF) return FMT_JPEG;
         /* GZIP */
         if (buf[0]==0x1F && buf[1]==0x8B) return FMT_GZIP;
+        /* MPEG Layer III: require a bounded multi-frame probe, not a filename. */
+        if (atm_mp3_probe(buf,size,&(atm_mp3_info_t){0})==0) return FMT_MP3;
         /* TAR (check at offset 257) */
         if (size > 262 && buf[257]=='u' && buf[258]=='s' && buf[259]=='t' &&
             buf[260]=='a' && buf[261]=='r') return FMT_TAR;
@@ -52,6 +55,7 @@ file_fmt_t fmt_detect(const uint8_t *buf, uint32_t size, const char *fn) {
     if (!kstrcmp(e,"bmp"))  return FMT_BMP;
     if (!kstrcmp(e,"png"))  return FMT_PNG;
     if (!kstrcmp(e,"jpg") || !kstrcmp(e,"jpeg")) return FMT_JPEG;
+    if (!kstrcmp(e,"mp3")) return FMT_MP3;
 
     return FMT_TEXT;  /* default: try as text */
 }
@@ -74,6 +78,7 @@ const char *fmt_name(file_fmt_t f) {
         case FMT_JPEG:     return "JPEG Image";
         case FMT_TAR:      return "TAR Archive";
         case FMT_GZIP:     return "GZip Archive";
+        case FMT_MP3:      return "MPEG Audio Layer III (inspection only)";
         default:           return "Unknown";
     }
 }
@@ -92,9 +97,12 @@ const char *fmt_mime(file_fmt_t f) {
         case FMT_TAR_ZST:  return "application/zstd";
         case FMT_TAR:      return "application/x-tar";
         case FMT_GZIP:     return "application/gzip";
+        case FMT_MP3:      return "audio/mpeg";
         default:           return "application/octet-stream";
     }
 }
+
+int fmt_mp3_info(const uint8_t *buf,uint32_t size,void *info_out){return atm_mp3_probe(buf,size,(atm_mp3_info_t *)info_out);}
 
 int fmt_is_text(file_fmt_t f) {
     return (f==FMT_TEXT||f==FMT_MARKDOWN||f==FMT_C_SOURCE||

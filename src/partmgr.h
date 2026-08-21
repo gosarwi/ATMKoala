@@ -32,6 +32,7 @@
 #define PART_TYPE_FAT32    0x0C
 #define PART_TYPE_LINUX    0x83
 #define PART_TYPE_LINUX_SWAP 0x82
+#define PART_TYPE_GPT_PROTECTIVE 0xEE
 #define PART_TYPE_CATFS    0xC5   /* atmkoala CatFS — unassigned upstream ID */
 
 #define PART_MAX_ENTRIES   4

@@ -61,7 +61,7 @@ extern exp_palette_t exp_palette;
 typedef enum {
     APP_NONE=0, APP_TERMINAL, APP_FILES, APP_EDITOR, APP_NOTEPAD,
     APP_SYSMON, APP_SETTINGS, APP_VIEWER, APP_ABOUT, APP_CALCULATOR,
-    APP_TASKS, APP_JOURNAL, APP_CLOCK, APP_CALENDAR, APP_TINYGL, APP_MINES, APP_SNAKE,
+    APP_TASKS, APP_JOURNAL, APP_CLOCK, APP_CALENDAR, APP_TINYGL, APP_MINES, APP_SNAKE, APP_PAINT,
     APP_IMAGE_VIEWER, /* legacy internal compatibility ID */
     APP_ARCHIVEEX,
     APP_EXTERNAL=0x70,
@@ -137,6 +137,12 @@ typedef struct {
     int length, dx, dy, score, state;
     uint32_t last_tick;
 } exp_snake_t;
+#define EXP_PAINT_W 32
+#define EXP_PAINT_H 18
+typedef struct {
+    uint8_t pixels[EXP_PAINT_H][EXP_PAINT_W];
+    int cursor_x, cursor_y, color;
+} exp_paint_t;
 
 typedef struct {
     char      msg[64];
@@ -178,6 +184,11 @@ typedef struct {
     /* Sysmon */
     sysmon_t   sysmon;
 
+    /* Clock / stopwatch: elapsed time is PIT-tick based and remains valid
+     * even if CMOS RTC is unavailable or its timezone basis is changed. */
+    uint32_t  stopwatch_elapsed_ticks, stopwatch_started_tick;
+    int       stopwatch_running;
+
     /* Settings */
     int       ext_slot;
     int        cfg_tab;
@@ -208,15 +219,17 @@ typedef struct {
     char       todo_input[TASK_TEXT_LEN];
     int        todo_sel, todo_count, todo_edit, todo_input_len;
 
-    /* Calendar is manual because ATMKoala has no RTC/NTP wall-clock yet. */
-    int        cal_year, cal_month;
+    /* Calendar follows a validated CMOS RTC date by default; manual navigation
+     * pauses following until the user presses T to return to today. */
+    int        cal_year, cal_month, cal_follow_today;
 
     /* TinyGL-Lite scene: 0=cube, 1=gears; both remain software-only. */
     int        tinygl_scene;
 
-    /* Native GUI games */
+    /* Native GUI games and tools */
     exp_mines_t mines;
     exp_snake_t snake;
+    exp_paint_t paint;
 } exp_win_t;
 
 /* State */
@@ -250,6 +263,8 @@ int  exp_wallpaper_apply(const char *path);
 const char *exp_wallpaper_current(void);
 void exp_notify(const char *msg, color32_t color);
 void exp_capture_char(char c);  /* called by vbe_console_putchar */
+/* Pure UTF-8 layout invariant; no framebuffer or configuration side effects. */
+int exp_text_layout_selftest(void);
 int  exp_is_active(void);        /* true while Exp owns framebuffer output */
 void exp_request_full_redraw(void); /* restore desktop after temporary overlay */
 int  exp_ui_scale_get(void); /* always 100 */

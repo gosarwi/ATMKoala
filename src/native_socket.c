@@ -28,7 +28,7 @@ void native_socket_task_cleanup(task_t *t){
 int native_socket_is_fd(const task_t *t,int fd){ return valid_fd(t,fd) && slots[t->socket_map[fd]].used && slots[t->socket_map[fd]].owner==t; }
 int native_socket_open(task_t *t,int domain,int type,int protocol){
     if(!t||!t->fd_table_ready||domain!=ATM_AF_INET||type!=ATM_SOCK_STREAM||protocol!=ATM_IPPROTO_TCP)return -1;
-    int fd=-1,slot=-1; for(int i=3;i<TASK_FD_MAX;i++)if(t->fd_map[i]<0&&t->socket_map[i]<0){fd=i;break;}
+    int fd=-1,slot=-1; for(int i=3;i<TASK_FD_MAX;i++)if(t->fd_map[i]<0&&t->socket_map[i]<0&&t->pipe_map[i]<0){fd=i;break;}
     for(int i=0;i<ATM_SOCKET_MAX;i++)if(!slots[i].used){slot=i;break;}
     if(fd<0||slot<0)return -1;
     kmemset(&slots[slot],0,sizeof(slots[slot]));slots[slot].owner=t;slots[slot].used=1;t->socket_map[fd]=slot;return fd;
@@ -69,7 +69,7 @@ int native_socket_selftest(void){
     task_t t;kmemset(&t,0,sizeof(t));
     /* A zeroed synthetic task does not carry task_create()'s -1 free-FD
      * invariant; initialize it explicitly before exercising socket_open(). */
-    for(int i=0;i<TASK_FD_MAX;i++)t.fd_map[i]=-1;
+    for(int i=0;i<TASK_FD_MAX;i++){t.fd_map[i]=-1;t.pipe_map[i]=-1;}
     t.fd_table_ready=1;
     native_socket_task_init(&t);
     int fd=native_socket_open(&t,ATM_AF_INET,ATM_SOCK_STREAM,ATM_IPPROTO_TCP); if(fd!=3||!native_socket_is_fd(&t,fd)||native_socket_close(&t,fd)<0||native_socket_is_fd(&t,fd))return -1;return 0;

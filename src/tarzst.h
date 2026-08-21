@@ -29,6 +29,15 @@ void tzst_info(const tzst_pkg_t *pkg);
  * through /tmp staging after control/manifest validation. */
 int tzst_install(const tzst_pkg_t *pkg);
 int tzst_remove(const char *pkg_name);
+/* Fetches a clear-text HTTP ATPK package, validates it, writes a local cache
+ * staging file and then invokes the existing transactional installer. */
+int tzst_fetch_install_http(const char *url);
+/* Bounded clear-text repository convenience layer. It stores only http://
+ * URLs and resolves one native package as <base>/<name>.atpk. */
+const char *tzst_repo_url(void);
+int tzst_repo_set_url(const char *url);
+int tzst_repo_fetch_package(const char *pkg_name);
+int tzst_repo_selftest(void);
 int tzst_wrap_elf(const uint8_t *elf_data, uint32_t elf_size,
                   const char *name, const char *version,
                   uint8_t *out_buf, uint32_t out_sz);

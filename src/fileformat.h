@@ -32,6 +32,7 @@ typedef enum {
     FMT_JPEG,          /* JPEG image */
     FMT_TAR,           /* TAR archive */
     FMT_GZIP,          /* .gz */
+    FMT_MP3,           /* MPEG Audio Layer III stream */
 } file_fmt_t;
 
 typedef struct {
@@ -40,7 +41,9 @@ typedef struct {
     const char *mime;       /* MIME type */
     int         is_text;
     int         is_binary;
-    int         is_image;
+    int          is_image;
+    int          is_audio;
+
 } fmt_info_t;
 
 /* Detect format from buffer (magic bytes) and/or filename extension */
@@ -59,6 +62,9 @@ void fmt_print_csv(const char *buf, uint32_t size);
 int  fmt_bmp_info(const uint8_t *buf, uint32_t size,
                   int *width, int *height, int *bpp);
 int  fmt_bmp_draw(const uint8_t *buf, uint32_t size, int x, int y);
+
+/* MP3 stream inspection only; no playback is implied by this function. */
+int  fmt_mp3_info(const uint8_t *buf,uint32_t size,void *info_out);
 
 /* ── TAR listing ── */
 int  fmt_tar_list(const uint8_t *buf, uint32_t size);

@@ -62,6 +62,12 @@ void ttf_render_char(int x, int y, uint32_t codepoint,
 /* Render UTF-8 string */
 void ttf_render_string(int x, int y, const char *utf8,
                        uint32_t fg, uint32_t bg);
+/* Bounded UTF-8 helpers. Width is in physical pixels; neither function
+ * splits a UTF-8 sequence. `wrap` returns the number of rendered rows. */
+int  ttf_render_string_clipped(int x,int y,const char *utf8,
+                               uint32_t fg,uint32_t bg,int max_width);
+int  ttf_render_string_wrapped(int x,int y,const char *utf8,
+                               uint32_t fg,uint32_t bg,int max_width,int max_rows);
 /* Exp desktop-only percentage scale; does not alter terminal font scale. */
 void ttf_render_string_percent(int x, int y, const char *utf8,
                                uint32_t fg, uint32_t bg, int percent);

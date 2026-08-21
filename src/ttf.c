@@ -229,6 +229,46 @@ void ttf_render_string(int x, int y, const char *utf8,
     }
 }
 
+/* ── Bounded UTF-8 rendering ───────────────────────────────── */
+int ttf_render_string_clipped(int x,int y,const char *utf8,uint32_t fg,uint32_t bg,int max_width){
+    if(!utf8||max_width<=0)return 0;
+    const uint8_t *p=(const uint8_t *)utf8;int cw=ttf_glyph_width(),drawn=0;
+    if(cw<=0)return 0;
+    while(*p&&*p!='\n'&&(drawn+1)*cw<=max_width){
+        uint32_t cp=utf8_decode(&p);
+        if(cp=='\n')break;
+        ttf_render_char(x+drawn*cw,y,cp,fg,bg);drawn++;
+    }
+    return drawn;
+}
+
+int ttf_render_string_wrapped(int x,int y,const char *utf8,uint32_t fg,uint32_t bg,int max_width,int max_rows){
+    if(!utf8||max_width<=0||max_rows<=0)return 0;
+    int cw=ttf_glyph_width(),ch=ttf_glyph_height();if(cw<=0||ch<=0)return 0;
+    int cols=max_width/cw;if(cols<1)return 0;
+    const uint8_t *p=(const uint8_t *)utf8;int row=1,col=0,space_pending=0,rendered=0;
+    while(*p&&row<=max_rows){
+        if(*p=='\n'){
+            p++;if(row>=max_rows)break;row++;y+=ch;col=0;space_pending=0;continue;
+        }
+        if(*p==' '||*p=='\t'){if(col>0)space_pending=1;p++;continue;}
+        const uint8_t *word=p,*q=p;int word_cols=0;
+        while(*q&&*q!='\n'&&*q!=' '&&*q!='\t'){(void)utf8_decode(&q);word_cols++;}
+        if(col>0&&space_pending){
+            if(col+1+word_cols>cols){if(row>=max_rows)break;row++;y+=ch;col=0;}
+            else {ttf_render_char(x+col*cw,y,' ',fg,bg);col++;rendered++;}
+        }else if(col>0&&col+word_cols>cols){
+            if(row>=max_rows)break;row++;y+=ch;col=0;
+        }
+        while(p<q){
+            if(col>=cols){if(row>=max_rows)return row;row++;y+=ch;col=0;}
+            uint32_t cp=utf8_decode(&p);ttf_render_char(x+col*cw,y,cp,fg,bg);col++;rendered++;
+        }
+        space_pending=0;
+    }
+    return rendered?row:0;
+}
+
 /* ── Exp percentage renderer ──────────────────────────────── */
 static void ttf_render_char_percent(int x,int y,uint32_t cp,uint32_t fg,uint32_t bg,int percent){
     if(percent<50)percent=50;if(percent>200)percent=200;

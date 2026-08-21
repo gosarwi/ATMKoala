@@ -4,6 +4,8 @@
 #include "paging.h"
 #include "kmalloc.h"
 #include "util.h"
+#include "linux_abi.h"
+#include "sched.h"
 #include <stdint.h>
 
 extern void ring3_enter(uint64_t cr3,uint64_t kernel_stack_top,
@@ -15,6 +17,7 @@ void usermode_init(void){
     /* IDT installation retains the syscall vector; this flag records that
      * the runtime TSS is live and a valid CPL 3 entry is now possible. */
     idt_enable_user_syscall_gate();
+    linux_abi_init();
     gate_ready=1;
 }
 int usermode_gate_ready(void){ return gate_ready; }
@@ -25,6 +28,9 @@ __attribute__((noreturn)) void usermode_enter(atm_user_context_t *ctx){
        ctx->stack_top<=ATM_USER_BASE||ctx->stack_top>ATM_USER_TOP)
         for(;;) __asm__ volatile("cli; hlt");
     gdt_set_kernel_stack(ctx->kernel_stack_top);
+    linux_abi_set_kernel_stack(ctx->kernel_stack_top);
+    task_t *task=sched_current();
+    linux_abi_set_fs_base(task?task->linux_fs_base:0);
     ring3_enter((uint64_t)ctx->space->cr3,ctx->kernel_stack_top,
                 ctx->stack_top,ctx->entry);
     __builtin_unreachable();

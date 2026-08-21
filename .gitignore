@@ -1,17 +1,24 @@
-# Generated build and disk artifacts
+# Generated build and local disk artifacts
 /build/
-*.iso
 *.img
 disk.img
 *.elf
 *.o
 
+# The checked-in verified v0.9 release image and checksum are intentional.
+*.iso
+!atmkoala-OS-v0.9-limine.iso
+!atmkoala-OS-v0.9-limine.iso.sha256
+
 # Generated Limine host binary and downloaded release archive
 third_party/limine/bin/limine
 third_party/limine/limine-binary.tar.gz
 
-# Historical local release snapshots; current mainline source is published directly.
+# Historical local release snapshots; mainline source is published directly.
 /release_v0.5_atm_loader/
+/release_v0.5_atmboot_sysmon/
+/release_v0.5_atmuefi/
+/release_v0.5_image_posix_exp/
 /v09_stability_guiabi_increment/
 
 # Local editor and OS files

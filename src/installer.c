@@ -34,10 +34,11 @@
  * is persisted and can later be changed with the timezone command. ATMKoala
  * still has no RTC/NTP wall-clock source, so this is a locale preference. */
 static const char *const installer_timezones[]={
-    "UTC","Europe/London","Europe/Lisbon","Europe/Paris","Europe/Berlin","Europe/Warsaw","Europe/Kyiv","Europe/Moscow","Europe/Istanbul",
-    "Africa/Cairo","Africa/Johannesburg","Asia/Dubai","Asia/Karachi","Asia/Kolkata","Asia/Dhaka","Asia/Bangkok","Asia/Jakarta","Asia/Shanghai","Asia/Singapore","Asia/Seoul","Asia/Tokyo","Asia/Manila",
-    "Australia/Perth","Australia/Adelaide","Australia/Sydney","Pacific/Auckland","Pacific/Honolulu",
-    "America/Sao_Paulo","America/Argentina/Buenos_Aires","America/New_York","America/Toronto","America/Chicago","America/Mexico_City","America/Denver","America/Phoenix","America/Los_Angeles","America/Anchorage"
+    "UTC","Europe/London","Europe/Dublin","Atlantic/Reykjavik","Europe/Lisbon","Europe/Madrid","Europe/Paris","Europe/Brussels","Europe/Amsterdam","Europe/Berlin","Europe/Copenhagen","Europe/Oslo","Europe/Stockholm","Europe/Rome","Europe/Vienna","Europe/Prague","Europe/Warsaw","Europe/Budapest","Europe/Athens","Europe/Bucharest","Europe/Helsinki","Europe/Kyiv","Europe/Riga","Europe/Vilnius","Europe/Moscow","Europe/Istanbul",
+    "Africa/Casablanca","Africa/Algiers","Africa/Lagos","Africa/Cairo","Africa/Johannesburg","Africa/Nairobi","Africa/Addis_Ababa",
+    "Asia/Jerusalem","Asia/Riyadh","Asia/Dubai","Asia/Tehran","Asia/Kabul","Asia/Karachi","Asia/Tashkent","Asia/Yekaterinburg","Asia/Omsk","Asia/Novosibirsk","Asia/Krasnoyarsk","Asia/Irkutsk","Asia/Yakutsk","Asia/Vladivostok","Asia/Magadan","Asia/Kamchatka","Asia/Kolkata","Asia/Kathmandu","Asia/Colombo","Asia/Dhaka","Asia/Yangon","Asia/Bangkok","Asia/Ho_Chi_Minh","Asia/Jakarta","Asia/Kuala_Lumpur","Asia/Singapore","Asia/Manila","Asia/Shanghai","Asia/Hong_Kong","Asia/Taipei","Asia/Ulaanbaatar","Asia/Seoul","Asia/Tokyo",
+    "Australia/Perth","Australia/Darwin","Australia/Adelaide","Australia/Brisbane","Australia/Sydney","Australia/Hobart","Pacific/Port_Moresby","Pacific/Guam","Pacific/Fiji","Pacific/Auckland","Pacific/Honolulu","Pacific/Pago_Pago",
+    "America/St_Johns","America/Halifax","America/Toronto","America/New_York","America/Detroit","America/Indiana/Indianapolis","America/Chicago","America/Winnipeg","America/Mexico_City","America/Guatemala","America/Costa_Rica","America/Panama","America/Bogota","America/Lima","America/Caracas","America/La_Paz","America/Santiago","America/Asuncion","America/Montevideo","America/Argentina/Buenos_Aires","America/Sao_Paulo","America/Phoenix","America/Denver","America/Edmonton","America/Los_Angeles","America/Vancouver","America/Anchorage"
 };
 #define INSTALL_TZ_COUNT ((int)(sizeof(installer_timezones)/sizeof(installer_timezones[0])))
 #define INSTALL_LOG_CAP 2048u
@@ -69,6 +70,8 @@ static void box(int x,int y,int w,int h,color32_t c){vbe_draw_rect(x,y,w,h,c);}
 static void text(int x,int y,const char*s,color32_t fg,color32_t bg){ttf_render_string(x,y,s,fg,bg);}
 static int inside(int px,int py,int x,int y,int w,int h){return px>=x&&py>=y&&px<x+w&&py<y+h;}
 static void button(int x,int y,int w,const char*label,int active){r(x,y,w,30,active?ACCENT:MUTED);box(x,y,w,30,active?ACCENT:LINE);text(x+12,y+8,label,active?PANEL:TEXT,active?ACCENT:MUTED);}
+static void disk_icon(int x,int y,color32_t c){box(x,y,28,18,c);r(x+3,y+4,22,7,c);r(x+4,y+13,4,2,PANEL);r(x+20,y+13,3,2,OK);}
+static void installer_cursor(void){const mouse_state_t*m=mouse_state();if(!m||!m->available)return;int x=m->x,y=m->y;/* visible arrow, rendered after all panels */r(x,y,2,14,TEXT);r(x+2,y+2,2,10,TEXT);r(x+4,y+4,2,8,TEXT);r(x+6,y+6,2,6,TEXT);r(x+8,y+9,6,2,TEXT);r(x+10,y+11,2,4,TEXT);}
 
 static int first_drive(void){for(int i=0;i<DISK_MAX_DRIVES;i++)if(disk_drives[i].present)return i;return -1;}
 static int next_drive(int cur,int dir){for(int n=1;n<=DISK_MAX_DRIVES;n++){int i=(cur+dir*n+DISK_MAX_DRIVES)%DISK_MAX_DRIVES;if(disk_drives[i].present)return i;}return cur;}
@@ -145,7 +148,7 @@ static void frame(int step,int target,uint32_t start,uint32_t sectors,int tz_idx
         const char *p=installer_log;int ly=py+182;
         while(*p&&ly<py+330){char line[92];int n=0;while(*p&&*p!='\n'&&n<(int)sizeof(line)-1)line[n++]=*p++;line[n]=0;if(*p=='\n')p++;text(px+22,ly,line,SUB,PANEL);ly+=18;}
         text(px+22,py+334,"Press L or Esc to return to the installer.",SUB,PANEL);
-        button(px+470,py+355,126,"Close log",1);vbe_present();return;
+        button(px+470,py+355,126,"Close log",1);installer_cursor();vbe_present();return;
     }
     if(step==0){
         text(px+22,py+154,"Welcome",TEXT,PANEL);
@@ -158,9 +161,9 @@ static void frame(int step,int target,uint32_t start,uint32_t sectors,int tz_idx
         else {
             char b[128],s[96];ksnprintf(b,sizeof(b),"Selected: hd%c - %s",'a'+target,disk_drives[target].model[0]?disk_drives[target].model:"ATA PIO disk");
             ksnprintf(s,sizeof(s),"Capacity: %u MiB (%u sectors)",disk_capacity_mib(target),drive_sectors(target));
-            text(px+22,py+190,b,TEXT,PANEL);text(px+22,py+214,s,SUB,PANEL);
+            disk_icon(px+22,py+184,ACCENT);text(px+60,py+190,b,TEXT,PANEL);text(px+60,py+214,s,SUB,PANEL);
             text(px+22,py+246,preflight?preflight:"",WARN,PANEL);
-            text(px+22,py+268,"Use Left/Right or Previous/Next; Continue selects the target.",SUB,PANEL);
+            text(px+22,py+268,"Mouse: Previous/Next changes drive; Continue selects it.",SUB,PANEL);
         button(px+22,py+300,120,"Previous",1);button(px+154,py+300,120,"Next",1);
         }
     }else if(step==2){
@@ -169,9 +172,10 @@ static void frame(int step,int target,uint32_t start,uint32_t sectors,int tz_idx
         ksnprintf(l1,sizeof(l1),"Target: hd%c1    Start LBA: %u (%u MiB)",'a'+target,start,start/2048u);
         ksnprintf(l2,sizeof(l2),"Size: %u MiB (%u sectors)    End LBA: %u",sectors/2048u,sectors,start+sectors-1u);
         text(px+22,py+185,l1,TEXT,PANEL);text(px+22,py+210,l2,TEXT,PANEL);
-        text(px+22,py+246,"Left/Right move start by 1 MiB. Up/Down change size by 64 MiB.",SUB,PANEL);
-        text(px+22,py+268,"Home restores the full usable disk layout. Press Enter for first-boot setup.",SUB,PANEL);
-        button(px+22,py+300,100,"Start -",start>INSTALL_ALIGN_LBA);button(px+132,py+300,100,"Start +",1);button(px+242,py+300,100,"Size -",sectors>INSTALL_MIN_SECTORS);button(px+352,py+300,100,"Size +",1);
+        text(px+22,py+246,"Mouse or keys: move start by 1 MiB; change size by 64 MiB.",SUB,PANEL);
+        text(px+22,py+268,"Home restores full usable layout. Continue opens first-boot setup.",SUB,PANEL);
+        r(px+22,py+286,430,10,MUTED);if(drive_sectors(target)){uint32_t begin=(start*430u)/drive_sectors(target),span=(sectors*430u)/drive_sectors(target);if(span<3)span=3;r(px+22+(int)begin,py+286,(int)span,10,ACCENT);}disk_icon(px+466,py+280,ACCENT);
+        button(px+22,py+304,100,"Start -",start>INSTALL_ALIGN_LBA);button(px+132,py+304,100,"Start +",1);button(px+242,py+304,100,"Size -",sectors>INSTALL_MIN_SECTORS);button(px+352,py+304,100,"Size +",1);
     }else if(step==3){
         char line[128],masked[65];int n=(int)kstrlen(root_password);if(n>60)n=60;for(int i=0;i<n;i++)masked[i]='*';masked[n]=0;
         text(px+22,py+154,"First-boot locale and root account",TEXT,PANEL);
@@ -192,7 +196,18 @@ static void frame(int step,int target,uint32_t start,uint32_t sectors,int tz_idx
     }else if(step==5){text(px+22,py+154,"Installing…",TEXT,PANEL);text(px+22,py+188,status,SUB,PANEL);
     }else {text(px+22,py+154,status,step==6?OK:WARN,PANEL);if(step==6){text(px+22,py+188,"CatFS is mounted at /data; timezone and root password were saved.",SUB,PANEL);}else text(px+22,py+188,"Installation failed; do not rely on the target until inspected.",WARN,PANEL);text(px+22,py+220,"Press Esc or Finish to return to the shell, then reboot to leave installer mode.",SUB,PANEL);}
     if(step<4){button(px+22,py+355,120,"Cancel",0);button(px+470,py+355,126,"Continue",target>=0);} else if(step==4)button(px+470,py+355,126,"Install",erase_count==5); else if(step>=6)button(px+470,py+355,126,"Finish",1);
-    vbe_present();
+    installer_cursor();vbe_present();
+}
+
+int installer_selftest(void){
+    /* Button rectangles use half-open geometry, preventing an edge click from
+     * activating two adjacent controls. These checks have no disk side effects. */
+    if(!inside(22,304,22,304,100,30)||inside(122,304,22,304,100,30))return -1;
+    if(!inside(121,304,22,304,100,30)||inside(22,334,22,304,100,30))return -1;
+    /* A layout strip remains bounded for the smallest valid visual span. */
+    uint32_t total=10000,start=2048,sectors=2048,begin=(start*430u)/total,span=(sectors*430u)/total;
+    if(begin>=430u)return -1;if(span<3u)span=3u;
+    return begin+span<=433u?0:-1;
 }
 
 void installer_run(void){
@@ -216,10 +231,10 @@ void installer_run(void){
             continue;
         }
         if(step==2){
-            if((k==KEY_LEFT&&start>INSTALL_ALIGN_LBA)||(click&&inside(m->x,m->y,px+22,py+300,100,30)&&start>INSTALL_ALIGN_LBA)){start-=INSTALL_ALIGN_LBA;layout_clamp(target,&start,&sectors);}
-            else if(k==KEY_RIGHT||(click&&inside(m->x,m->y,px+132,py+300,100,30))){start+=INSTALL_ALIGN_LBA;layout_clamp(target,&start,&sectors);}
-            else if(k==KEY_UP||(click&&inside(m->x,m->y,px+352,py+300,100,30))){if(sectors<=drive_sectors(target)-start-INSTALL_SIZE_STEP_SECTORS)sectors+=INSTALL_SIZE_STEP_SECTORS;layout_clamp(target,&start,&sectors);}
-            else if(k==KEY_DOWN||(click&&inside(m->x,m->y,px+242,py+300,100,30))){if(sectors>INSTALL_MIN_SECTORS+INSTALL_SIZE_STEP_SECTORS)sectors-=INSTALL_SIZE_STEP_SECTORS;else sectors=INSTALL_MIN_SECTORS;layout_clamp(target,&start,&sectors);}
+            if((k==KEY_LEFT&&start>INSTALL_ALIGN_LBA)||(click&&inside(m->x,m->y,px+22,py+304,100,30)&&start>INSTALL_ALIGN_LBA)){start-=INSTALL_ALIGN_LBA;layout_clamp(target,&start,&sectors);}
+            else if(k==KEY_RIGHT||(click&&inside(m->x,m->y,px+132,py+304,100,30))){start+=INSTALL_ALIGN_LBA;layout_clamp(target,&start,&sectors);}
+            else if(k==KEY_UP||(click&&inside(m->x,m->y,px+352,py+304,100,30))){if(sectors<=drive_sectors(target)-start-INSTALL_SIZE_STEP_SECTORS)sectors+=INSTALL_SIZE_STEP_SECTORS;layout_clamp(target,&start,&sectors);}
+            else if(k==KEY_DOWN||(click&&inside(m->x,m->y,px+242,py+304,100,30))){if(sectors>INSTALL_MIN_SECTORS+INSTALL_SIZE_STEP_SECTORS)sectors-=INSTALL_SIZE_STEP_SECTORS;else sectors=INSTALL_MIN_SECTORS;layout_clamp(target,&start,&sectors);}
             else if(k==KEY_HOME){layout_default(target,&start,&sectors);}
             else if((k=='\n'||k=='\r'||(click&&inside(m->x,m->y,px+470,py+355,126,30)))&&sectors>=INSTALL_MIN_SECTORS){setup_field=0;step=3;}
             continue;

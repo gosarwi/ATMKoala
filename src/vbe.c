@@ -205,9 +205,12 @@ void vbe_fill_rect(int x, int y, int w, int h, color32_t c) {
     if(h>(int)vbe.height-y)h=(int)vbe.height-y;
     uint8_t *base=vbe_draw_base();
     if(vbe.bpp==32){
+        uint64_t pair=(uint64_t)c|((uint64_t)c<<32);
         for(int row=0;row<h;row++){
             uint32_t *p=(uint32_t *)(base+(uint32_t)(y+row)*vbe.pitch)+(uint32_t)x;
-            int col=0;for(;col+3<w;col+=4){p[col]=c;p[col+1]=c;p[col+2]=c;p[col+3]=c;}for(;col<w;col++)p[col]=c;
+            int col=0;if(((uintptr_t)p&7u)&&col<w){p[col++]=c;}
+            uint64_t *q=(uint64_t *)(p+col);for(;col+1<w;col+=2)*q++=pair;
+            if(col<w)p[col]=c;
         }
     }else{
         uint8_t b=(uint8_t)c,g=(uint8_t)(c>>8),r=(uint8_t)(c>>16);
@@ -268,6 +271,19 @@ void vbe_clear(color32_t c) {
     vbe_fill_rect(0, 0, (int)vbe.width, (int)vbe.height, c);
 }
 
+int vbe_fastpath_selftest(void) {
+    static uint32_t surface[32];
+    vbe_state_t saved=vbe;uint8_t *saved_back=vbe_backbuffer;uint32_t saved_back_size=vbe_backbuffer_size;int saved_buffered=vbe_buffered;
+    const color32_t first=RGB(0x12,0x34,0x56),last=RGB(0xA0,0xB0,0xC0);int rc=0;
+    kmemset(surface,0,sizeof(surface));vbe.fb=surface;vbe.width=8;vbe.height=4;vbe.pitch=8u*4u;vbe.bpp=32;vbe.active=1;vbe_backbuffer=NULL;vbe_backbuffer_size=0;vbe_buffered=0;
+    vbe_fill_rect(-1,1,4,2,first);
+    for(int y=0;y<4;y++)for(int x=0;x<8;x++){uint32_t want=(y==1||y==2)&&x<3?first:0;if(surface[y*8+x]!=want)rc=-1;}
+    vbe_fill_rect(6,3,4,4,last);
+    if(surface[3*8+6]!=last||surface[3*8+7]!=last)rc=-1;
+    vbe=saved;vbe_backbuffer=saved_back;vbe_backbuffer_size=saved_back_size;vbe_buffered=saved_buffered;
+    return rc;
+}
+
 /* ═══════════════════════════════════════════════════════════════
  *  Font rendering
  * ═══════════════════════════════════════════════════════════════ */
@@ -325,7 +341,10 @@ static void vbe_console_scroll(void) {
     uint8_t *dst = (uint8_t *)vbe.fb;
     uint8_t *src = dst + line_bytes;
     uint32_t copy_bytes = ((uint32_t)CONS_ROWS - 1) * line_bytes;
-    for (uint32_t i = 0; i < copy_bytes; i++) dst[i] = src[i];
+    /* Destination starts before source, so forward copying is memmove-safe.
+     * Move whole pixels/words instead of one byte at a time. */
+    uint32_t i=0;for(;i+7u<copy_bytes;i+=8u)*(uint64_t *)(dst+i)=*(const uint64_t *)(src+i);
+    for(;i<copy_bytes;i++)dst[i]=src[i];
     /* clear last row */
     vbe_fill_rect(0, (int)((CONS_ROWS - 1) * FONT_H),
                   (int)vbe.width, FONT_H, cons_bg);

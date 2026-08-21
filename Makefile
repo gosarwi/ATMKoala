@@ -46,13 +46,13 @@ LIBC_SMOKE_ELF = build/libc_smoke.elf
 LIBC_SMOKE_BLOB = build/libc_smoke_blob.o
 
 OBJS = build/boot.o        $(LIBC_SMOKE_BLOB) build/gdt.o        build/idt.o       build/pit.o     \
-       build/kmalloc.o     build/vga.o        build/vbe.o       build/keyboard.o build/mouse.o \
-       build/util.o        build/paging.o     build/uaccess.o    build/usermode.o  build/native_fd.o build/native_socket.o build/native_app.o build/vfs.o        build/sched.o     build/elf.o     \
+       build/kmalloc.o     build/vga.o        build/vbe.o       build/keyboard.o build/mouse.o build/rtc.o \
+       build/util.o        build/atm_time.o build/atm_uname.o build/paging.o     build/uaccess.o    build/usermode.o  build/linux_abi.o build/native_fd.o build/native_pipe.o build/native_dir.o build/native_socket.o build/native_app.o build/vfs.o        build/sched.o     build/elf.o     \
        build/net.o         build/net_tcp.o     build/disk.o       build/catfs.o      build/catfs_vfs.o \
        build/config.o      build/locale.o      build/users.o      build/atminit.o build/atm_posix.o build/atm_syscall.o \
        build/partmgr.o     build/diskmgr.o    build/bsd_compat.o build/vga_modeset.o \
-       build/icmp.o        build/dns.o                                            \
-       build/tarzst.o        build/atmbox.o     build/fileformat.o build/image_decode.o build/image_fixtures.o build/awm.o       build/exp.o       build/ossdk.o   \
+       build/icmp.o        build/dns.o        build/http_client.o                   \
+       build/tarzst.o        build/atmbox.o     build/fileformat.o build/mp3.o build/image_decode.o build/image_fixtures.o build/awm.o       build/exp.o       build/ossdk.o   \
        build/fat32.o        build/ext2.o       build/ext2_vfs.o   build/btrfs.o      build/hw_y116.o     build/tinygl_lite.o build/mesa_foundation.o \
        build/osbuilder.o   build/font.o       build/gamesdk.o                   \
        build/minesweeper.o build/snake_game.o build/gamelauncher.o build/store.o                                      \
@@ -155,28 +155,38 @@ run-atmuefi: atmuefi
 build/boot.o: boot/boot.s | build
 	$(AS) $(ASFLAGS) $< -o $@
 
-$(LIBC_SMOKE_ELF): $(NATIVE_LIBC_DIR)/src/crt0.s $(NATIVE_LIBC_DIR)/src/crt.c $(NATIVE_LIBC_DIR)/src/string.c $(NATIVE_LIBC_DIR)/src/ctype.c $(NATIVE_LIBC_DIR)/src/errno.c $(NATIVE_LIBC_DIR)/src/unistd.c $(NATIVE_LIBC_DIR)/src/malloc.c $(NATIVE_LIBC_DIR)/src/stdlib.c $(NATIVE_LIBC_DIR)/src/stdio.c $(NATIVE_LIBC_DIR)/src/socket.c $(NATIVE_LIBC_DIR)/src/atm_gui_stub.c $(NATIVE_LIBC_DIR)/src/internal.h $(NATIVE_LIBC_DIR)/demo/libc_smoke.c $(NATIVE_LIBC_DIR)/atm_native.ld $(NATIVE_LIBC_DIR)/include/atm_crt.h $(NATIVE_LIBC_DIR)/include/ctype.h $(NATIVE_LIBC_DIR)/include/errno.h $(NATIVE_LIBC_DIR)/include/unistd.h $(NATIVE_LIBC_DIR)/include/fcntl.h $(NATIVE_LIBC_DIR)/include/stdlib.h $(NATIVE_LIBC_DIR)/include/string.h $(NATIVE_LIBC_DIR)/include/stdio.h $(NATIVE_LIBC_DIR)/include/sys/stat.h $(NATIVE_LIBC_DIR)/include/sys/socket.h $(NATIVE_LIBC_DIR)/include/netinet/in.h sdk/atm_native_abi.h sdk/atm_gui.h | build
+$(LIBC_SMOKE_ELF): $(NATIVE_LIBC_DIR)/src/crt0.s $(NATIVE_LIBC_DIR)/src/crt.c $(NATIVE_LIBC_DIR)/src/string.c $(NATIVE_LIBC_DIR)/src/ctype.c $(NATIVE_LIBC_DIR)/src/errno.c $(NATIVE_LIBC_DIR)/src/time.c $(NATIVE_LIBC_DIR)/src/utsname.c $(NATIVE_LIBC_DIR)/src/select.c $(NATIVE_LIBC_DIR)/src/unistd.c $(NATIVE_LIBC_DIR)/src/fcntl.c $(NATIVE_LIBC_DIR)/src/poll.c $(NATIVE_LIBC_DIR)/src/dirent.c $(NATIVE_LIBC_DIR)/src/malloc.c $(NATIVE_LIBC_DIR)/src/stdlib.c $(NATIVE_LIBC_DIR)/src/stdio.c $(NATIVE_LIBC_DIR)/src/socket.c $(NATIVE_LIBC_DIR)/src/atm_gui_stub.c $(NATIVE_LIBC_DIR)/src/internal.h $(NATIVE_LIBC_DIR)/demo/libc_smoke.c $(NATIVE_LIBC_DIR)/atm_native.ld $(NATIVE_LIBC_DIR)/include/atm_crt.h $(NATIVE_LIBC_DIR)/include/ctype.h $(NATIVE_LIBC_DIR)/include/errno.h $(NATIVE_LIBC_DIR)/include/time.h $(NATIVE_LIBC_DIR)/include/sys/time.h $(NATIVE_LIBC_DIR)/include/sys/utsname.h $(NATIVE_LIBC_DIR)/include/sys/select.h $(NATIVE_LIBC_DIR)/include/unistd.h $(NATIVE_LIBC_DIR)/include/fcntl.h $(NATIVE_LIBC_DIR)/include/poll.h $(NATIVE_LIBC_DIR)/include/stdlib.h $(NATIVE_LIBC_DIR)/include/string.h $(NATIVE_LIBC_DIR)/include/stdio.h $(NATIVE_LIBC_DIR)/include/sys/stat.h $(NATIVE_LIBC_DIR)/include/sys/socket.h $(NATIVE_LIBC_DIR)/include/sys/uio.h $(NATIVE_LIBC_DIR)/include/sys/wait.h $(NATIVE_LIBC_DIR)/include/dirent.h $(NATIVE_LIBC_DIR)/include/netinet/in.h sdk/atm_native_abi.h sdk/atm_gui.h | build
 	@mkdir -p build/libc-smoke
 	$(AS) --64 $(NATIVE_LIBC_DIR)/src/crt0.s -o build/libc-smoke/crt0.o
 	$(CC) $(NATIVE_LIBC_CFLAGS) -c $(NATIVE_LIBC_DIR)/src/crt.c -o build/libc-smoke/crt.o
 	$(CC) $(NATIVE_LIBC_CFLAGS) -c $(NATIVE_LIBC_DIR)/src/string.c -o build/libc-smoke/string.o
 	$(CC) $(NATIVE_LIBC_CFLAGS) -c $(NATIVE_LIBC_DIR)/src/ctype.c -o build/libc-smoke/ctype.o
 	$(CC) $(NATIVE_LIBC_CFLAGS) -c $(NATIVE_LIBC_DIR)/src/errno.c -o build/libc-smoke/errno.o
+	$(CC) $(NATIVE_LIBC_CFLAGS) -c $(NATIVE_LIBC_DIR)/src/time.c -o build/libc-smoke/time.o
+	$(CC) $(NATIVE_LIBC_CFLAGS) -c $(NATIVE_LIBC_DIR)/src/utsname.c -o build/libc-smoke/utsname.o
+	$(CC) $(NATIVE_LIBC_CFLAGS) -c $(NATIVE_LIBC_DIR)/src/select.c -o build/libc-smoke/select.o
 	$(CC) $(NATIVE_LIBC_CFLAGS) -c $(NATIVE_LIBC_DIR)/src/unistd.c -o build/libc-smoke/unistd.o
+	$(CC) $(NATIVE_LIBC_CFLAGS) -c $(NATIVE_LIBC_DIR)/src/fcntl.c -o build/libc-smoke/fcntl.o
+	$(CC) $(NATIVE_LIBC_CFLAGS) -c $(NATIVE_LIBC_DIR)/src/poll.c -o build/libc-smoke/poll.o
+	$(CC) $(NATIVE_LIBC_CFLAGS) -c $(NATIVE_LIBC_DIR)/src/dirent.c -o build/libc-smoke/dirent.o
 	$(CC) $(NATIVE_LIBC_CFLAGS) -c $(NATIVE_LIBC_DIR)/src/malloc.c -o build/libc-smoke/malloc.o
 	$(CC) $(NATIVE_LIBC_CFLAGS) -c $(NATIVE_LIBC_DIR)/src/stdlib.c -o build/libc-smoke/stdlib.o
 	$(CC) $(NATIVE_LIBC_CFLAGS) -c $(NATIVE_LIBC_DIR)/src/stdio.c -o build/libc-smoke/stdio.o
 	$(CC) $(NATIVE_LIBC_CFLAGS) -c $(NATIVE_LIBC_DIR)/src/socket.c -o build/libc-smoke/socket.o
 	$(CC) $(NATIVE_LIBC_CFLAGS) -c $(NATIVE_LIBC_DIR)/src/atm_gui_stub.c -o build/libc-smoke/atm_gui_stub.o
 	$(CC) $(NATIVE_LIBC_CFLAGS) -c $(NATIVE_LIBC_DIR)/demo/libc_smoke.c -o build/libc-smoke/main.o
-	$(LD) -m elf_x86_64 -T $(NATIVE_LIBC_DIR)/atm_native.ld build/libc-smoke/crt0.o build/libc-smoke/crt.o build/libc-smoke/string.o build/libc-smoke/ctype.o build/libc-smoke/errno.o build/libc-smoke/unistd.o build/libc-smoke/malloc.o build/libc-smoke/stdlib.o build/libc-smoke/stdio.o build/libc-smoke/socket.o build/libc-smoke/atm_gui_stub.o build/libc-smoke/main.o -o $@
+	$(LD) -m elf_x86_64 -T $(NATIVE_LIBC_DIR)/atm_native.ld build/libc-smoke/crt0.o build/libc-smoke/crt.o build/libc-smoke/string.o build/libc-smoke/ctype.o build/libc-smoke/errno.o build/libc-smoke/time.o build/libc-smoke/utsname.o build/libc-smoke/select.o build/libc-smoke/unistd.o build/libc-smoke/fcntl.o build/libc-smoke/poll.o build/libc-smoke/dirent.o build/libc-smoke/malloc.o build/libc-smoke/stdlib.o build/libc-smoke/stdio.o build/libc-smoke/socket.o build/libc-smoke/atm_gui_stub.o build/libc-smoke/main.o -o $@
 
 $(LIBC_SMOKE_BLOB): $(LIBC_SMOKE_ELF) | build
 	$(LD) -r -b binary -o $@ $<
 	$(OBJCOPY) --add-section .note.GNU-stack=/dev/null --set-section-flags .note.GNU-stack=noload,readonly $@
 
 build/%.o: src/%.c | build
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) -MMD -MP -MF $(@:.o=.d) -c $< -o $@
+
+# Generated dependency files ensure header layout changes rebuild every
+# affected translation unit; missing files after `make clean` are harmless.
+-include $(OBJS:.o=.d)
 
 build:    ; @mkdir -p build
 

@@ -29,5 +29,9 @@ typedef struct stat {
 #define S_ISREG(m) (((m)&S_IFMT)==S_IFREG)
 #define S_ISDIR(m) (((m)&S_IFMT)==S_IFDIR)
 
+int stat(const char *path,stat_t *st);
+int lstat(const char *path,stat_t *st);
 int fstat(int fd,stat_t *st);
+int fstatat(int dirfd,const char *path,stat_t *st,int flags);
+int chmod(const char *path,mode_t mode);
 #endif

@@ -25,6 +25,8 @@
 #include "gdt.h"
 #include "idt.h"
 #include "pit.h"
+#include "rtc.h"
+#include "atm_time.h"
 #include "kmalloc.h"
 #include "sched.h"
 #include "elf.h"
@@ -35,6 +37,8 @@
 #include "catfs_vfs.h"
 #include "config.h"
 #include "tarzst.h"
+#include "http_client.h"
+#include "mp3.h"
 #include "atmbox.h"
 #include "fileformat.h"
 #include "image_fixtures.h"
@@ -66,6 +70,7 @@
 #include "atm_syscall.h"
 #include "native_app.h"
 #include "native_fd.h"
+#include "native_dir.h"
 #include "installer.h"
 #include "paging.h"
 #include "uaccess.h"
@@ -2081,16 +2086,22 @@ void dispatch(char *line) {
         con_writeln("[    0.010] Shell ready");
     }
     else if (!kstrcmp(cmd,"date")) {
-        uint32_t s=sched_uptime_ticks()/100;const char *tz=sysconf_get("system","timezone");
-        cprintf("atmkoala uptime %u seconds  timezone=%s\n",s,tz&&tz[0]?tz:"UTC");
-        con_writeln("Wall clock is unavailable until RTC or NTP synchronization is implemented.");
+        uint32_t s=sched_uptime_ticks()/100;const char *tz=sysconf_get("system","timezone"),*basis=sysconf_get("system","rtc_basis");rtc_datetime_t now;int offset=0,dst=0;
+        if(rtc_read_datetime(&now)==0){
+            if(!basis||kstrcmp(basis,"local")!=0){
+                rtc_datetime_t local;if(atm_timezone_convert(tz&&tz[0]?tz:"UTC",&now,&local,&offset,&dst)==0){int a=offset<0?-offset:offset;cprintf("Local %04d-%02d-%02d %02d:%02d:%02d  zone=%s UTC%c%02d:%02d%s\n",local.year,local.month,local.day,local.hour,local.minute,local.second,tz&&tz[0]?tz:"UTC",offset<0?'-':'+',a/60,a%60,dst?" DST":"");con_writeln("CMOS RTC is configured as UTC; local civil time uses ATMKoala's embedded current-era timezone rules.");}
+                else {cprintf("CMOS UTC %04d-%02d-%02d %02d:%02d:%02d  zone=%s\n",now.year,now.month,now.day,now.hour,now.minute,now.second,tz&&tz[0]?tz:"UTC");con_writeln("Selected zone is not in the embedded rule table; choose a listed zone.");}
+            } else {cprintf("Firmware-local RTC %04d-%02d-%02d %02d:%02d:%02d  zone=%s\n",now.year,now.month,now.day,now.hour,now.minute,now.second,tz&&tz[0]?tz:"UTC");con_writeln("No conversion is applied because timezone clock local was selected.");}
+        } else {cprintf("atmkoala uptime %u seconds  timezone=%s\n",s,tz&&tz[0]?tz:"UTC");con_writeln("CMOS RTC date is unavailable or invalid; NTP synchronization is not implemented.");}
     }
     else if (!kstrcmp(cmd,"timezone")) {
-        if(argc==1){const char *tz=sysconf_get("system","timezone");cprintf("timezone: %s\n",tz&&tz[0]?tz:"UTC");con_writeln("usage: timezone [IANA-style name] | timezone list");goto done;}
-        if(!kstrcmp(argv[1],"list")){con_writeln("UTC  Europe/London Lisbon Paris Berlin Warsaw Kyiv Moscow Istanbul");con_writeln("Africa/Cairo Johannesburg  Asia/Dubai Karachi Kolkata Dhaka Bangkok Jakarta Shanghai Singapore Seoul Tokyo Manila");con_writeln("Australia/Perth Adelaide Sydney  Pacific/Auckland Honolulu");con_writeln("America/Sao_Paulo Argentina/Buenos_Aires New_York Toronto Chicago Mexico_City Denver Phoenix Los_Angeles Anchorage");con_writeln("Any bounded IANA-style identifier may be stored; wall-clock offset conversion needs RTC/NTP.");goto done;}
+        const char *saved_tz=sysconf_get("system","timezone"),*basis=sysconf_get("system","rtc_basis");
+        if(argc==1){cprintf("timezone: %s (RTC basis: %s)\n",saved_tz&&saved_tz[0]?saved_tz:"UTC",basis&&!kstrcmp(basis,"local")?"local":"UTC");con_writeln("usage: timezone [IANA-style name] | timezone list | timezone clock utc|local");goto done;}
+        if(!kstrcmp(argv[1],"clock")){if(argc<3|| (kstrcmp(argv[2],"utc")&&kstrcmp(argv[2],"local"))){C_ERR();con_writeln("timezone clock: choose utc or local");C_NRM();goto done;}if(sysconf_set("system","rtc_basis",argv[2])<0){C_ERR();con_writeln("timezone: configuration capacity reached");C_NRM();goto done;}sysconf_save();C_OK();cprintf("timezone: firmware RTC basis saved as %s\n",argv[2]);C_NRM();goto done;}
+        if(!kstrcmp(argv[1],"list")){con_writeln("UTC; Europe: London Dublin Reykjavik Lisbon Madrid Paris Berlin Rome Warsaw Athens Helsinki Kyiv Moscow Istanbul");con_writeln("Africa: Casablanca Algiers Lagos Cairo Johannesburg Nairobi; Asia: Jerusalem Riyadh Dubai Tehran Kabul Karachi Tashkent Yekaterinburg Omsk Novosibirsk Krasnoyarsk Irkutsk Yakutsk Vladivostok Magadan Kamchatka Kolkata Kathmandu Colombo Dhaka Yangon Bangkok Jakarta Kuala_Lumpur Singapore Shanghai Hong_Kong Taipei Seoul Tokyo");con_writeln("Australia: Perth Darwin Adelaide Brisbane Sydney Hobart; Pacific: Port_Moresby Guam Fiji Auckland Honolulu Pago_Pago");con_writeln("America: St_Johns Halifax Toronto New_York Detroit Chicago Winnipeg Mexico_City Guatemala Costa_Rica Panama Bogota Lima Caracas La_Paz Santiago Asuncion Montevideo Argentina/Buenos_Aires Sao_Paulo Phoenix Denver Edmonton Los_Angeles Vancouver Anchorage");con_writeln("Listed identifiers have embedded current-era UTC/DST rules. Default RTC basis is UTC; use timezone clock local only if firmware already keeps local time. No NTP or historic TZif database.");goto done;}
         const char *tz=!kstrcmp(argv[1],"set")&&argc>=3?argv[2]:argv[1];int valid=tz[0]&&kstrlen(tz)<64;
         for(const char *p=tz;*p&&valid;p++)if(!((*p>='A'&&*p<='Z')||(*p>='a'&&*p<='z')||(*p>='0'&&*p<='9')||*p=='/'||*p=='_'||*p=='+'||*p=='-'))valid=0;
-        if(!valid){C_ERR();con_writeln("timezone: use a bounded IANA-style identifier (for example Europe/Moscow)");C_NRM();goto done;}
+        if(!valid||!atm_timezone_supported(tz)){C_ERR();con_writeln("timezone: choose a listed identifier with embedded conversion rules");C_NRM();goto done;}
         if(sysconf_set("system","timezone",tz)<0){C_ERR();con_writeln("timezone: configuration capacity reached");C_NRM();goto done;}
         sysconf_save();C_OK();cprintf("timezone: saved %s\n",tz);C_NRM();
     }
@@ -2144,8 +2155,10 @@ void dispatch(char *line) {
             }
         }
         if(!disk_count){
-            C_WRN();con_writeln("No ATA PIO block disks detected.");
-            con_writeln("Use an IDE/ATA drive in the current build; AHCI, NVMe and USB mass-storage are not block drivers yet.");C_NRM();
+            int transports=0;C_WRN();con_writeln("No ATA PIO block disks detected.");
+            for(int i=0;i<g_pci.count;i++){pci_device_t*p=&g_pci.devs[i];if(p->class_code!=0x01)continue;const char *kind=p->subclass==0x06?"AHCI":p->subclass==0x08?"NVMe":"other storage";cprintf("  PCI %02x:%02x.%u: %s controller %04x:%04x detected, but no block driver is bound.\n",p->bus,p->dev,p->fn,kind,p->vendor,p->device);transports++;}
+            if(!transports)con_writeln("  No PCI AHCI/NVMe storage controller was discovered on scanned buses.");
+            con_writeln("USB flash media also needs xHCI/EHCI enumeration plus BOT/SCSI mass-storage; it is not exposed as a block device yet.");C_NRM();
         }
     }
     else if (!kstrcmp(cmd,"swap")) {
@@ -2164,11 +2177,11 @@ void dispatch(char *line) {
             pci_device_t *p=&g_pci.devs[i];if(p->class_code!=0x03)continue;found++;
             const char *vendor=p->vendor==PCI_VENDOR_INTEL?"Intel":p->vendor==0x10DE?"NVIDIA":p->vendor==0x1002?"AMD":"unknown vendor";
             const char *state="PCI device detected; no native hardware GPU driver";
-            if(p->vendor==PCI_VENDOR_INTEL&&p->device==PCI_DEV_UHD600)state=g_i915.initialized?"Intel UHD 600 VBE/framebuffer helper active; no 3D acceleration":"Intel UHD 600 detected; framebuffer helper inactive";
+            if(p->vendor==PCI_VENDOR_INTEL&&p->device==PCI_DEV_UHD600)state=g_i915.initialized?"Intel UHD 600: boot framebuffer adopted; native modeset/3D unavailable":"Intel UHD 600 detected; boot framebuffer unavailable";
             cprintf("  %02x:%02x.%u  %s %04x:%04x class 03:%02x IRQ%u — %s\n",p->bus,p->dev,p->fn,vendor,p->vendor,p->device,p->subclass,p->irq,state);
         }
         if(!found)con_writeln("  no PCI display controller (class 0x03) found.");
-        con_writeln("Display output uses the boot-provided VBE framebuffer where available; TinyGL-Lite is CPU software rendering, not a GPU driver.");
+        con_writeln("Display output uses a boot-provided framebuffer where available; UHD 600 detection does not program display registers, modeset, GTT or 3D.");
     }
     else if (!kstrcmp(cmd,"usb")) {
         int hosts=0;
@@ -2176,15 +2189,17 @@ void dispatch(char *line) {
         for(int i=0;i<g_pci.count;i++){
             pci_device_t *p=&g_pci.devs[i];
             if(p->class_code!=0x0C || p->subclass!=0x03) continue;
-            cprintf("  %02x:%02x.%u  USB host controller interface=0x%x vendor=%04x device=%04x\n",p->bus,p->dev,p->fn,p->prog_if,p->vendor,p->device);
+            const char *kind=p->prog_if==0x00?"UHCI":p->prog_if==0x10?"OHCI":p->prog_if==0x20?"EHCI":p->prog_if==0x30?"xHCI":"unknown";
+            cprintf("  %02x:%02x.%u  %s host controller (interface=0x%x) vendor=%04x device=%04x BAR0=0x%x\n",p->bus,p->dev,p->fn,kind,p->prog_if,p->vendor,p->device,p->bar[0]);
             hosts++;
         }
         if(!hosts) con_writeln("  no PCI USB host controller detected");
-        C_DIM();con_writeln("USB device enumeration and BOT/SCSI mass-storage transport are not implemented; no USB disk is exposed as a block device yet.");C_NRM();
+        C_DIM();con_writeln("PCI USB discovery is available, but USB enumeration, xHCI/EHCI scheduling, HID mouse reports and BOT/SCSI mass-storage are not implemented; no USB mouse or flash disk is exposed by this build yet.");C_NRM();
     }
     else if (!kstrcmp(cmd,"mouse")) {
         const mouse_state_t *ms=mouse_state();
         cprintf("mouse: %s  available=%s pos=%d,%d buttons=0x%x packets=%u dropped=%u\n",mouse_status_string(),ms&&ms->available?"yes":"no",ms?ms->x:0,ms?ms->y:0,ms?ms->buttons:0,ms?ms->packets:0,ms?ms->dropped_packets:0);
+        if(ms)cprintf("mouse: irq-bytes=%u sync-loss=%u controller-drained=%u\n",ms->irq_bytes,ms->sync_losses,ms->controller_drained);
         if(!ms||!ms->available)con_writeln("mouse: only legacy PS/2 auxiliary input is implemented; USB/HID mouse transport is not available yet.");
     }
     else if (!kstrcmp(cmd,"df")) {
@@ -2405,6 +2420,38 @@ void dispatch(char *line) {
             tzst_remove(argv[2]);
             goto done;
         }
+        /* pkg repo show | pkg repo set http://host/base configures only the
+         * intentionally limited clear-text HTTP repository bootstrap. */
+        if(!kstrcmp(argv[1],"repo")) {
+            if(argc==2 || (argc==3 && !kstrcmp(argv[2],"show"))) {
+                const char *repo=tzst_repo_url();
+                if(repo)cprintf("pkg repo: %s (HTTP only; unsigned)\n",repo);
+                else con_writeln("pkg repo: not configured");
+            } else if(argc==4 && !kstrcmp(argv[2],"set")) {
+                if(tzst_repo_set_url(argv[3])<0){C_ERR();con_writeln("pkg repo: expected bounded http://host/base URL");C_NRM();}
+                else {C_WRN();con_writeln("pkg repo: HTTP bootstrap stored; TLS and signatures are unavailable");C_NRM();}
+            } else {C_ERR();con_writeln("pkg repo: usage: pkg repo [show|set http://host/base]");C_NRM();}
+            goto done;
+        }
+        /* pkg get <name> resolves <configured-repo>/<name>.atpk, then uses the
+         * same bounded download, ATPK validation, cache and install path. */
+        if(!kstrcmp(argv[1],"get")) {
+            if(argc!=3){C_ERR();con_writeln("pkg get: usage: pkg get <native-package-name>");C_NRM();goto done;}
+            int grc=tzst_repo_fetch_package(argv[2]);
+            if(grc<0){C_ERR();cprintf("pkg get: repository fetch, validation, cache, or install failed (rc=%d)\n",grc);C_NRM();}
+            else {C_OK();con_writeln("pkg get: validated ATPK cached and installed");C_NRM();}
+            goto done;
+        }
+        /* pkg fetch <http-url> downloads only a bounded HTTP ATPK package,
+         * validates/caches it, then uses the transactional native installer. */
+        if(!kstrcmp(argv[1],"fetch")) {
+            if(argc!=3){C_ERR();con_writeln("pkg fetch: usage: pkg fetch http://host/path/package.atpk");C_NRM();goto done;}
+            if(kstrncmp(argv[2],"http://",7)!=0){C_ERR();con_writeln("pkg fetch: only clear-text HTTP is implemented; HTTPS/TLS is unavailable");C_NRM();goto done;}
+            int frc=tzst_fetch_install_http(argv[2]);
+            if(frc<0){C_ERR();cprintf("pkg fetch: download, validation, cache, or install failed (rc=%d)\n",frc);C_NRM();}
+            else {C_OK();con_writeln("pkg fetch: validated ATPK cached and installed");C_NRM();}
+            goto done;
+        }
         /* pkg create <name> <elf_path> creates a native ATPK archive. */
         if(!kstrcmp(argv[1],"create")) {
             if(argc<4){C_ERR();con_writeln("pkg create: usage: pkg create <name> <elf_path>");C_NRM();goto done;}
@@ -2435,6 +2482,17 @@ void dispatch(char *line) {
         if(pkg_parse_rc<0){char pc[16];C_ERR();terminal_write("ATPK parser rc=");if(pkg_parse_rc<0){terminal_putchar('-');kuitoa((uint32_t)(-pkg_parse_rc),pc,10);}else kuitoa((uint32_t)pkg_parse_rc,pc,10);terminal_writeln(pc);C_NRM();goto done;}
         if(!kstrcmp(argv[1],"info")) tzst_info(&pkg2);
         else if(!kstrcmp(argv[1],"install")) tzst_install(&pkg2);
+    }
+    else if (!kstrcmp(cmd,"mp3info")) {
+        if(argc<2){C_ERR();con_writeln("mp3info: usage: mp3info <path>");C_NRM();goto done;}
+        char p[128];build_abs(argv[1],p);int fd2=vfs_open(p,O_RDONLY,0);
+        if(fd2<0){C_ERR();cprintf("mp3info: %s not found\n",argv[1]);C_NRM();goto done;}
+        static uint8_t mb[ATM_MP3_SCAN_MAX];int n=vfs_read(fd2,mb,sizeof(mb));vfs_close(fd2);atm_mp3_info_t mi;
+        if(n<=0||atm_mp3_probe(mb,(uint32_t)n,&mi)<0){C_ERR();con_writeln("mp3info: no supported MPEG Audio Layer III frame sequence in bounded prefix");C_NRM();goto done;}
+        cprintf("MP3: MPEG-%u Layer III, %u Hz, %u kbps%s, %s, %u inspected frame(s), ~%u ms\n",mi.mpeg_version,mi.sample_rate_hz,mi.bitrate_kbps,mi.vbr?" VBR":"",mi.channels==1?"mono":"stereo",mi.frame_count,mi.duration_ms_estimate);
+        if(g_hda.pcm_output_ready)con_writeln("Audio: PCM output path ready");
+        else if(g_hda.controller_present)con_writeln("Audio: HDA controller detected; codec/DMA PCM playback is not implemented yet");
+        else con_writeln("Audio: no HDA controller detected; MP3 support currently provides inspection only");
     }
     else if (!kstrcmp(cmd,"readelf")) {
         if(argc<2) goto done;
@@ -2571,14 +2629,54 @@ void dispatch(char *line) {
             cprintf("  Credentials : %s\n",(f&ATM_POSIX_UIDGID)?"UID/GID and permission bits":"unavailable");
             cprintf("  Metadata    : %s\n",(f&ATM_POSIX_META)?"stat/lstat/fstat chmod/chown":"unavailable");
             cprintf("  FDs/size    : %s\n",(f&ATM_POSIX_TRUNC)?"dup/dup2 truncate/ftruncate":"unavailable");
+            cprintf("  I/O         : %s\n",(f&ATM_POSIX_IOV)?"pread/pwrite readv/writev (bounded native ABI)":"unavailable");
+            cprintf("  Time        : %s\n",(f&ATM_POSIX_TIME)?"clock_gettime realtime/monotonic and gettimeofday; RTC/NTP timezone control unavailable":"unavailable");
+            cprintf("  Select      : %s\n",(f&ATM_POSIX_SELECT)?"zero-timeout pipe readiness only; 64-fd sets, 16 watched descriptors":"unavailable");
+            cprintf("  Sync        : %s\n",(f&ATM_POSIX_SYNC)?"fsync/fdatasync (backend-supported persistence)":"unavailable");
             cprintf("  Links       : %s\n",(f&ATM_POSIX_LINKS)?"hard links, symlinks and readlink":"unavailable");
             cprintf("  Runtime     : %s\n",(f&ATM_POSIX_CWD)?"cwd/chdir, relative paths, access, umask, directories, isatty":"unavailable");
+            cprintf("  Dir streams : task-owned opaque opendir/readdir/closedir handles (native ABI v7)\n");
+            cprintf("  Poll        : zero-timeout pipe readiness only; blocking timeout and socket/VFS readiness unavailable\n");
             cprintf("  Address space: kernel map clone + user page window (CR3=0x%x)\n",(uint32_t)paging_kernel_cr3());
             cprintf("  Ring 3 gate   : %s (TSS rsp0 + DPL3 int 0x80)\n",usermode_gate_ready()?"ready":"closed");
-            C_DIM(); con_writeln("  Next: complete CPL3 exit/context-switch handoff and add process-owned fd tables; no Linux binary ABI."); C_NRM();
+            C_DIM(); con_writeln("  Native ABI v9 adds bounded pipes, descriptor/status fcntl flags, zero-timeout pipe poll/select, PIT-backed sleep/time, static process startup, and a restricted static-ET_EXEC execve with FD_CLOEXEC; fork, dynamic linking, full argv/envp and Linux binary ABI are not implemented."); C_NRM();
         } else if(!kstrcmp(argv[1],"test")) {
-            int pt=paging_selftest(), ua=uaccess_selftest(), ps=atm_posix_selftest(), sc=atm_syscall_selftest(), nf=native_fd_selftest(), na=native_app_selftest(), lc=native_app_libc_selftest(), im=atm_image_selftest();
-            cprintf("posix test: paging=%s uaccess=%s vfs-posix=%s syscall-usercopy=%s process-fd=%s native-cpl3=%s static-libc=%s image-bmp=%s\n",pt==0?"OK":"FAIL",ua==0?"OK":"FAIL",ps==0?"OK":"FAIL",sc==0?"OK":"FAIL",nf==0?"OK":"FAIL",na==0?"OK":"FAIL",lc==0?"OK":"FAIL",im==0?"OK":"FAIL");
+            sdk_serial_write("[posix] paging\n"); int pt=paging_selftest();
+            sdk_serial_write("[posix] uaccess\n"); int ua=uaccess_selftest();
+            sdk_serial_write("[posix] vfs\n"); int ps=atm_posix_selftest();
+            sdk_serial_write("[posix] syscall\n"); int sc=atm_syscall_selftest();
+            sdk_serial_write("[posix] fd\n"); int nf=native_fd_selftest();
+            sdk_serial_write("[posix] dir\n"); int nd=native_dir_selftest();
+            sdk_serial_write("[posix] native\n"); int na=native_app_selftest();
+            sdk_serial_write("[posix] linux-l0\n"); int la=native_app_linux_abi_selftest();
+            sdk_serial_write("[posix] linux-l1\n"); int l1=native_app_linux_l1_selftest();
+            sdk_serial_write("[posix] linux-l3\n"); int l3=native_app_linux_l3_selftest();
+            sdk_serial_write("[posix] exec\n"); int ex=native_app_exec_selftest();
+            sdk_serial_write("[posix] cpl3-wait\n"); int cw=native_app_cpl3_wait_selftest();
+            sdk_serial_write("[posix] libc\n"); int lc=native_app_libc_selftest();
+            sdk_serial_write("[posix] pipe\n"); int ipc=native_app_pipe_ipc_selftest();
+            sdk_serial_write("[posix] image\n"); int im=atm_image_selftest();
+            sdk_serial_write("[vbe] fastpath\n"); int vf=vbe_fastpath_selftest();
+            if(vf==0)sdk_serial_write("[vbe] fastpath-ok\n");else sdk_serial_write("[vbe] fastpath-fail\n");
+            sdk_serial_write("[http] parser\n"); int hp=atm_http_selftest();
+            if(hp==0)sdk_serial_write("[http] parser-ok\n");else sdk_serial_write("[http] parser-fail\n");
+            sdk_serial_write("[mp3] parser\n"); int mp=atm_mp3_selftest();
+            if(mp==0)sdk_serial_write("[mp3] parser-ok\n");else sdk_serial_write("[mp3] parser-fail\n");
+            sdk_serial_write("[hda] detect\n"); int hd=hda_selftest();
+            if(hd==0)sdk_serial_write("[hda] detect-ok\n");else sdk_serial_write("[hda] detect-fail\n");
+            sdk_serial_write("[uhd600] detect\n"); int ug=i915_selftest();
+            if(ug==0)sdk_serial_write("[uhd600] detect-ok\n");else sdk_serial_write("[uhd600] detect-fail\n");
+            sdk_serial_write("[hardware] status\n"); int hs=hardware_status_selftest();
+            if(hs==0)sdk_serial_write("[hardware] status-ok\n");else sdk_serial_write("[hardware] status-fail\n");
+            sdk_serial_write("[installer] ui\n"); int ii=installer_selftest();
+            if(ii==0)sdk_serial_write("[installer] ui-ok\n");else sdk_serial_write("[installer] ui-fail\n");
+            sdk_serial_write("[exp] utf8-layout\n"); int eu=exp_text_layout_selftest();
+            if(eu==0)sdk_serial_write("[exp] utf8-layout-ok\n");else sdk_serial_write("[exp] utf8-layout-fail\n");
+            sdk_serial_write("[time] timezone\n"); int tzr=atm_timezone_selftest();
+            if(tzr==0)sdk_serial_write("[time] timezone-ok\n");else sdk_serial_write("[time] timezone-fail\n");
+            sdk_serial_write("[pkg] repo\n"); int rp=tzst_repo_selftest();
+            if(rp==0)sdk_serial_write("[pkg] repo-ok\n");else sdk_serial_write("[pkg] repo-fail\n");
+            cprintf("posix test: paging=%s uaccess=%s vfs-posix=%s syscall-usercopy=%s process-fd=%s native-dir=%s native-cpl3=%s linux-l0=%s linux-l1=%s linux-l3=%s exec=%s cpl3-wait=%s static-libc=%s pipe-ipc=%s image-bmp=%s vbe-fastpath=%s http-parser=%s mp3-parser=%s hda-detect=%s uhd600-detect=%s hardware-status=%s installer-ui=%s exp-utf8-layout=%s timezone=%s pkg-repo=%s\n",pt==0?"OK":"FAIL",ua==0?"OK":"FAIL",ps==0?"OK":"FAIL",sc==0?"OK":"FAIL",nf==0?"OK":"FAIL",nd==0?"OK":"FAIL",na==0?"OK":"FAIL",la==0?"OK":"FAIL",l1==0?"OK":"FAIL",l3==0?"OK":"FAIL",ex==0?"OK":"FAIL",cw==0?"OK":"FAIL",lc==0?"OK":"FAIL",ipc==0?"OK":"FAIL",im==0?"OK":"FAIL",vf==0?"OK":"FAIL",hp==0?"OK":"FAIL",mp==0?"OK":"FAIL",hd==0?"OK":"FAIL",ug==0?"OK":"FAIL",hs==0?"OK":"FAIL",ii==0?"OK":"FAIL",eu==0?"OK":"FAIL",tzr==0?"OK":"FAIL",rp==0?"OK":"FAIL");
         } else if(!kstrcmp(argv[1],"ring3")) {
             if(!session_is_privileged()){ C_ERR(); con_writeln("posix ring3: administrator privileges required"); C_NRM(); goto done; }
             C_WRN(); con_write("Type RING3 to enter destructive CPL 3 diagnostic: "); C_NRM();
@@ -2587,9 +2685,9 @@ void dispatch(char *line) {
             con_writeln("posix ring3: entering native CPL 3 self-test; inspect QEMU CS=0x1b, RAX=2, then reboot.");
             usermode_selftest_enter();
         } else if(!kstrcmp(argv[1],"api")) {
-            con_writeln("open close read write lseek stat lstat fstat dup dup2 truncate ftruncate");
-            con_writeln("chmod chown mkdir rmdir unlink rename link symlink readlink getuid getgid");
-            con_writeln("chdir getcwd access umask opendir readdir closedir isatty (native source ABI)");
+            con_writeln("open close read write pread pwrite readv writev lseek stat lstat fstat");
+            con_writeln("dup dup2 truncate ftruncate fsync fdatasync chmod chown mkdir rmdir unlink");
+            con_writeln("rename link symlink readlink getuid getgid chdir getcwd access umask directories isatty");
         } else con_writeln("posix: status | test | ring3 | api");
     }
     else if (!kstrcmp(cmd,"gui")) {
@@ -2985,6 +3083,11 @@ void kernel_main(uint64_t mb_magic, uint64_t mbinfo_phys) {
      * USB controller diagnostics without enabling or driving those devices. */
     pci_init(&g_pci);
     radio_detect(&g_radio,&g_pci);
+    i915_detect(&g_i915,&g_pci);
+    /* Preserve firmware's selected framebuffer on a detected Gemini Lake
+     * UHD 600. This adopts no PCI/MMIO ownership and does not modeset. */
+    if(g_i915.pci_present&&use_vbe)
+        (void)i915_fb_init(&g_i915,(uint64_t)(uintptr_t)vbe.fb,vbe.width,vbe.height,vbe.pitch,vbe.bpp);
     disk_init();
     /* Preserve legacy whole-disk CatFS while also accepting the aligned primary
      * CatFS partition created by the standalone installer. */

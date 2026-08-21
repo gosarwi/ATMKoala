@@ -122,10 +122,14 @@ typedef struct {
 typedef struct {
     int      wifi_controller_present;
     int      wifi_driver_ready;
+    int      wifi_connected; /* true only after an association-capable driver reports link */
+    uint8_t  wifi_signal_pct; /* 0 unless a real Wi-Fi driver supplies RSSI */
     uint16_t wifi_vendor, wifi_device;
     int      usb_host_present;
     int      bluetooth_controller_present;
     int      bluetooth_driver_ready;
+    int      bluetooth_enabled;
+    int      bluetooth_connected;
 } radio_status_t;
 
 /* ── eDP Panel ────────────────────────────────────────────── */
@@ -186,17 +190,31 @@ typedef struct {
     uint64_t rx_bytes, tx_bytes;
 } rtl8168_state_t;
 
+/* ── Intel HD Audio discovery ────────────────────────────── */
+typedef struct {
+    int      controller_present;
+    int      pcm_output_ready; /* true only after future codec + DMA setup */
+    uint16_t vendor, device;
+    uint64_t mmio_base;
+    uint16_t gcap;
+    uint16_t codec_mask; /* STATESTS hardware-reported codec addresses */
+} hda_state_t;
+
 /* ── Intel UHD 600 framebuffer ───────────────────────────── */
 typedef struct {
     uint32_t width, height, pitch;
     uint8_t  bpp;
-    uint64_t fb_phys;     /* physical base */
-    uint8_t *fb_virt;     /* mapped virtual */
-    int      initialized;
+    uint64_t fb_phys;     /* physical base supplied by bootloader */
+    uint8_t *fb_virt;     /* inherited boot framebuffer mapping */
+    int      initialized; /* valid inherited framebuffer handoff */
+    int      pci_present; /* exact PCI detection; no modeset ownership */
+    int      native_modeset_ready; /* remains 0: no display-pipe/GTT driver */
+    int      acceleration_ready;   /* remains 0: no GEM/3D driver */
+    uint8_t  pci_bus,pci_dev,pci_fn;
     /* Gemini Lake GT2 specific */
     uint32_t pci_devid;   /* 0x3185 */
-    uint64_t mmio_base;
-    uint32_t stolen_mb;   /* stolen VRAM size */
+    uint64_t mmio_base;   /* observed BAR only; not programmed by discovery */
+    uint32_t stolen_mb;   /* host-bridge aperture report */
 } i915_fb_t;
 
 /* ── HPET ────────────────────────────────────────────────── */
@@ -236,6 +254,12 @@ void         battery_init(battery_info_t *bat);
 void         battery_update(battery_info_t *bat);
 void         battery_print(const battery_info_t *bat);
 void         radio_detect(radio_status_t *radio, const pci_bus_t *bus);
+int          hardware_status_selftest(void);
+
+/* Intel HD Audio read-only controller/codec discovery. */
+void         hda_detect(hda_state_t *audio,const pci_bus_t *bus);
+void         hda_print(const hda_state_t *audio);
+int          hda_selftest(void);
 
 /* Backlight */
 void         backlight_init(backlight_t *bl);
@@ -258,8 +282,10 @@ uint64_t     hpet_read(void);
 void         hpet_sleep_us(uint32_t us);
 
 /* i915 framebuffer */
+void         i915_detect(i915_fb_t *fb,const pci_bus_t *bus);
 int          i915_fb_init(i915_fb_t *fb, uint64_t phys, uint32_t w,
                            uint32_t h, uint32_t pitch, uint8_t bpp);
+int          i915_selftest(void);
 void         i915_fb_fill(i915_fb_t *fb, uint32_t color);
 void         i915_fb_blit(i915_fb_t *fb, uint32_t x, uint32_t y,
                            uint32_t w, uint32_t h, const uint32_t *pixels);
@@ -278,6 +304,7 @@ extern edp_panel_t     g_panel;
 extern pci_bus_t     g_pci;
 extern rtl8168_state_t g_rtl8168;
 extern hpet_state_t  g_hpet;
+extern hda_state_t   g_hda;
 extern i915_fb_t     g_i915;
 
 #endif /* HW_Y116_H */

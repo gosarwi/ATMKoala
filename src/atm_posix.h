@@ -80,6 +80,8 @@ uint32_t atm_posix_getppid(void);
 #define ATM_POSIX_IOV     0x800u
 #define ATM_POSIX_SYNC    0x1000u
 #define ATM_POSIX_TASKCTX 0x2000u
+#define ATM_POSIX_TIME    0x4000u
+#define ATM_POSIX_SELECT  0x8000u
 uint32_t atm_posix_features(void);
 int      atm_posix_selftest(void);
 

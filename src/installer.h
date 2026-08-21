@@ -4,5 +4,7 @@
 /* Runs only from the `installer` Multiboot command line boot mode.
  * Returns after success, cancellation or a fatal installer error. */
 void installer_run(void);
+/* Pure UI/layout checks; never probes or writes storage. */
+int installer_selftest(void);
 
 #endif
