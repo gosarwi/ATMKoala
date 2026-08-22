@@ -21,12 +21,19 @@ typedef vfs_stat_t atm_posix_stat_t;
 #define ATM_POSIX_W_OK 2
 #define ATM_POSIX_R_OK 4
 
+/* Source-level VFS dirfd helpers. The Linux syscall ABI remains separately
+ * documented and may expose only AT_FDCWD. */
+#define ATM_POSIX_AT_FDCWD (-100)
+#define ATM_POSIX_AT_SYMLINK_NOFOLLOW 0x100u
+#define ATM_POSIX_AT_REMOVEDIR 0x200u
+
 typedef DIR_t atm_posix_dir_t;
 typedef vfs_dirent_t atm_posix_dirent_t;
 typedef struct { void *iov_base; uint64_t iov_len; } atm_posix_iovec_t;
 
 int     atm_posix_open(const char *path, uint32_t flags, uint32_t mode);
 int     atm_posix_creat(const char *path, uint32_t mode);
+int     atm_posix_openat(int dirfd,const char *path,uint32_t flags,uint32_t mode);
 int     atm_posix_close(int fd);
 int64_t atm_posix_read(int fd, void *buf, uint64_t count);
 int64_t atm_posix_write(int fd, const void *buf, uint64_t count);
@@ -40,6 +47,7 @@ int64_t atm_posix_lseek(int fd, int64_t offset, int whence);
 int     atm_posix_stat(const char *path, atm_posix_stat_t *st);
 int     atm_posix_lstat(const char *path, atm_posix_stat_t *st);
 int     atm_posix_fstat(int fd, atm_posix_stat_t *st);
+int     atm_posix_fstatat(int dirfd,const char *path,atm_posix_stat_t *st,uint32_t flags);
 int     atm_posix_fchmod(int fd,uint32_t mode);
 int     atm_posix_fchown(int fd,uint32_t uid,uint32_t gid);
 int     atm_posix_dup(int fd);
@@ -48,23 +56,32 @@ int     atm_posix_truncate(const char *path, uint64_t size);
 int     atm_posix_ftruncate(int fd, uint64_t size);
 int     atm_posix_chmod(const char *path, uint32_t mode);
 int     atm_posix_chown(const char *path, uint32_t uid, uint32_t gid);
+int     atm_posix_fchmodat(int dirfd,const char *path,uint32_t mode,uint32_t flags);
+int     atm_posix_fchownat(int dirfd,const char *path,uint32_t uid,uint32_t gid,uint32_t flags);
 int     atm_posix_mkdir(const char *path, uint32_t mode);
+int     atm_posix_mkdirat(int dirfd,const char *path,uint32_t mode);
 int     atm_posix_rmdir(const char *path);
 int     atm_posix_unlink(const char *path);
+int     atm_posix_unlinkat(int dirfd,const char *path,uint32_t flags);
 int     atm_posix_chdir(const char *path);
 /* Changes task-local CWD through an open VFS-backed directory descriptor. */
 int     atm_posix_fchdir(int fd);
 char   *atm_posix_getcwd(char *buf, size_t size);
 int     atm_posix_access(const char *path, int mode);
+int     atm_posix_faccessat(int dirfd,const char *path,int mode,uint32_t flags);
 uint32_t atm_posix_umask(uint32_t newmask);
 int     atm_posix_isatty(int fd);
 atm_posix_dir_t *atm_posix_opendir(const char *path);
 atm_posix_dirent_t *atm_posix_readdir(atm_posix_dir_t *dir);
 int     atm_posix_closedir(atm_posix_dir_t *dir);
 int     atm_posix_rename(const char *oldpath, const char *newpath);
+int     atm_posix_renameat(int olddirfd,const char *oldpath,int newdirfd,const char *newpath);
+int     atm_posix_linkat(int olddirfd,const char *oldpath,int newdirfd,const char *newpath,uint32_t flags);
+int     atm_posix_symlinkat(const char *target,int newdirfd,const char *linkpath);
 int     atm_posix_link(const char *oldpath, const char *newpath);
 int     atm_posix_symlink(const char *target, const char *linkpath);
 int     atm_posix_readlink(const char *path, char *buf, size_t size);
+int     atm_posix_readlinkat(int dirfd,const char *path,char *buf,size_t size);
 
 /* Native path-configuration selectors. Values describe only ATMKoala VFS
  * bounds, rather than device-specific host filesystem limits. */
@@ -100,6 +117,7 @@ int      atm_posix_getsid(int32_t pid);
 #define ATM_POSIX_SELECT  0x8000u
 #define ATM_POSIX_SESSION 0x10000u
 #define ATM_POSIX_LIMITS  0x20000u
+#define ATM_POSIX_AT       0x40000u
 uint32_t atm_posix_features(void);
 int      atm_posix_selftest(void);
 

@@ -51,6 +51,7 @@
 #include "ossdk.h"
 #include "fat32.h"
 #include "ext2.h"
+#include "ext2_vfs.h"
 #include "btrfs.h"
 #include "hw_y116.h"
 #include "osbuilder.h"
@@ -2432,7 +2433,7 @@ void dispatch(char *line) {
     /* ====== DISKMGR — interactive disk partitioning TUI ====== */
     else if (!kstrcmp(cmd,"diskmgr") || !kstrcmp(cmd,"fdisk") || !kstrcmp(cmd,"cfdisk")) {
         if (argc>=2 && !kstrcmp(argv[1],"test")) {
-            cprintf("cfdisk test: mbr-validation=%s\n",mbr_selftest()==0?"OK":"FAIL");
+            cprintf("cfdisk test: mbr-validation=%s staged-transitions=%s\n",mbr_selftest()==0?"OK":"FAIL",diskmgr_selftest()==0?"OK":"FAIL");
         } else diskmgr_run();
     }
     /* Config === extended in v10 */
@@ -2755,6 +2756,10 @@ void dispatch(char *line) {
             if(ir==0)sdk_serial_write("[init] runtime-ok\n");else sdk_serial_write("[init] runtime-fail\n");
             sdk_serial_write("[exp] utf8-layout\n"); int eu=exp_text_layout_selftest();
             if(eu==0)sdk_serial_write("[exp] utf8-layout-ok\n");else sdk_serial_write("[exp] utf8-layout-fail\n");
+            sdk_serial_write("[atmbox] primitives\n"); int ab=atmbox_selftest();
+            if(ab==0)sdk_serial_write("[atmbox] primitives-ok\n");else sdk_serial_write("[atmbox] primitives-fail\n");
+            sdk_serial_write("[cfdisk] staged\n"); int cf= diskmgr_selftest();
+            if(cf==0)sdk_serial_write("[cfdisk] staged-ok\n");else sdk_serial_write("[cfdisk] staged-fail\n");
             sdk_serial_write("[time] timezone\n"); int tzr=atm_timezone_selftest();
             if(tzr==0)sdk_serial_write("[time] timezone-ok\n");else sdk_serial_write("[time] timezone-fail\n");
             sdk_serial_write("[rtc] writer\n"); int rtcw=rtc_write_selftest();
@@ -2765,7 +2770,7 @@ void dispatch(char *line) {
             if(rp==0)sdk_serial_write("[pkg] repo-ok\n");else sdk_serial_write("[pkg] repo-fail\n");
             sdk_serial_write("[ixpy] parser-raw-source\n"); int xp=ixpy_selftest();
             if(xp==0)sdk_serial_write("[ixpy] parser-raw-source-ok\n");else sdk_serial_write("[ixpy] parser-raw-source-fail\n");
-            cprintf("posix test: paging=%s uaccess=%s vfs-posix=%s syscall-usercopy=%s process-fd=%s native-dir=%s native-cpl3=%s linux-l0=%s linux-descriptor=%s linux-session=%s linux-v22=%s linux-l1=%s linux-l3=%s exec=%s cpl3-wait=%s cpl3-signal=%s static-libc=%s pipe-ipc=%s image-bmp=%s vbe-fastpath=%s vbe-geometry=%s udp-parser=%s ntp-parser=%s http-parser=%s mp3-parser=%s hda-detect=%s uhd600-detect=%s hardware-status=%s installer-ui=%s init-runtime=%s exp-utf8-layout=%s timezone=%s tzif-parser=%s pkg-repo=%s ixpy-parser=%s\n",pt==0?"OK":"FAIL",ua==0?"OK":"FAIL",ps==0?"OK":"FAIL",sc==0?"OK":"FAIL",nf==0?"OK":"FAIL",nd==0?"OK":"FAIL",na==0?"OK":"FAIL",la==0?"OK":"FAIL",ld==0?"OK":"FAIL",ls==0?"OK":"FAIL",lv22==0?"OK":"FAIL",l1==0?"OK":"FAIL",l3==0?"OK":"FAIL",ex==0?"OK":"FAIL",cw==0?"OK":"FAIL",csig==0?"OK":"FAIL",lc==0?"OK":"FAIL",ipc==0?"OK":"FAIL",im==0?"OK":"FAIL",vf==0?"OK":"FAIL",vg==0?"OK":"FAIL",udp==0?"OK":"FAIL",ntp==0?"OK":"FAIL",hp==0?"OK":"FAIL",mp==0?"OK":"FAIL",hd==0?"OK":"FAIL",ug==0?"OK":"FAIL",hs==0?"OK":"FAIL",ii==0?"OK":"FAIL",ir==0?"OK":"FAIL",eu==0?"OK":"FAIL",tzr==0?"OK":"FAIL",tzif==0?"OK":"FAIL",rp==0?"OK":"FAIL",xp==0?"OK":"FAIL");
+            cprintf("posix test: paging=%s uaccess=%s vfs-posix=%s syscall-usercopy=%s process-fd=%s native-dir=%s native-cpl3=%s linux-l0=%s linux-descriptor=%s linux-session=%s linux-v22=%s linux-l1=%s linux-l3=%s exec=%s cpl3-wait=%s cpl3-signal=%s static-libc=%s pipe-ipc=%s image-bmp=%s vbe-fastpath=%s vbe-geometry=%s udp-parser=%s ntp-parser=%s http-parser=%s mp3-parser=%s hda-detect=%s uhd600-detect=%s hardware-status=%s installer-ui=%s init-runtime=%s exp-utf8-layout=%s atmbox-primitives=%s timezone=%s tzif-parser=%s pkg-repo=%s ixpy-parser=%s\n",pt==0?"OK":"FAIL",ua==0?"OK":"FAIL",ps==0?"OK":"FAIL",sc==0?"OK":"FAIL",nf==0?"OK":"FAIL",nd==0?"OK":"FAIL",na==0?"OK":"FAIL",la==0?"OK":"FAIL",ld==0?"OK":"FAIL",ls==0?"OK":"FAIL",lv22==0?"OK":"FAIL",l1==0?"OK":"FAIL",l3==0?"OK":"FAIL",ex==0?"OK":"FAIL",cw==0?"OK":"FAIL",csig==0?"OK":"FAIL",lc==0?"OK":"FAIL",ipc==0?"OK":"FAIL",im==0?"OK":"FAIL",vf==0?"OK":"FAIL",vg==0?"OK":"FAIL",udp==0?"OK":"FAIL",ntp==0?"OK":"FAIL",hp==0?"OK":"FAIL",mp==0?"OK":"FAIL",hd==0?"OK":"FAIL",ug==0?"OK":"FAIL",hs==0?"OK":"FAIL",ii==0?"OK":"FAIL",ir==0?"OK":"FAIL",eu==0?"OK":"FAIL",ab==0?"OK":"FAIL",tzr==0?"OK":"FAIL",tzif==0?"OK":"FAIL",rp==0?"OK":"FAIL",xp==0?"OK":"FAIL");
         } else if(!kstrcmp(argv[1],"ring3")) {
             if(!session_is_privileged()){ C_ERR(); con_writeln("posix ring3: administrator privileges required"); C_NRM(); goto done; }
             C_WRN(); con_write("Type RING3 to enter destructive CPL 3 diagnostic: "); C_NRM();
@@ -2899,14 +2904,31 @@ void dispatch(char *line) {
         else con_writeln("btrfs: probe <drive> <part> | status | rw <on|off> | label <name> | clear");
     }
     else if (!kstrcmp(cmd,"ext2")) {
-        if(argc<2){con_writeln("ext2: mount <drive> <part> | info | status | rw <on|off> | write <path> <offset> <text> | ls [-l] [path] | stat <path> | readlink <path> | cat <path> | catrange <path> <byte> | umount");goto done;}
+        if(argc<2){con_writeln("ext2: mount <drive> <part> | vfs <on [path]|off|status> | vfstest <path> | vfswrite <path> [offset] <text> | info | status | rw <on|off> | write <path> <offset> <text> | ls [-l] [path] | stat <path> | readlink <path> | cat <path> | catrange <path> <byte> | umount");goto done;}
         if(!kstrcmp(argv[1],"mount")&&argc>=4){
             int d=kstrtoi(argv[2]),p=kstrtoi(argv[3]);
+            if(ext2_vfs_is_mounted()&&ext2_vfs_unmount()<0){C_ERR();con_writeln("ext2: remount refused; close Ext2 VFS descriptors first");C_NRM();goto done;}
             if(ext2_mount_partition(d,p)<0){C_ERR();cprintf("ext2: mount failed: %s (MBR %02x %02x)\n",ext2_last_error(),ext2.mbr_sig0,ext2.mbr_sig1);C_NRM();}
-            else {C_OK();cprintf("ext2: mounted read-only; %u-byte blocks, volume '%s'\n",ext2.block_size,ext2.volume_name);C_NRM();}
-        } else if(!kstrcmp(argv[1],"umount")){ext2_unmount();con_writeln("ext2: unmounted");}
+            else {C_OK();cprintf("ext2: mounted read-only; %u-byte blocks, volume '%s'. Use 'ext2 vfs on' for explicit VFS attach.\n",ext2.block_size,ext2.volume_name);C_NRM();}
+        } else if(!kstrcmp(argv[1],"umount")){if(ext2_vfs_is_mounted()&&ext2_vfs_unmount()<0){C_ERR();con_writeln("ext2: unmount refused; close Ext2 VFS descriptors first");C_NRM();}else{ext2_unmount();con_writeln("ext2: unmounted (VFS detached)");}}
+        else if(!kstrcmp(argv[1],"vfs")){
+            if(argc<3||!kstrcmp(argv[2],"status")){cprintf("ext2 vfs: %s\n",ext2_vfs_is_mounted()?(ext2_vfs_is_busy()?"attached; busy (close Ext2 VFS descriptors before detach)":"attached (guarded writes follow ext2 rw policy)"):"detached");}
+            else if(!kstrcmp(argv[2],"on")){const char *mp=argc>=4?argv[3]:"/mnt/ext2";if(!ext2.mounted){C_ERR();con_writeln("ext2 vfs: mount an Ext2 partition first");C_NRM();}else if(ext2_vfs_is_mounted()){C_WRN();con_writeln("ext2 vfs: already attached; detach before choosing another path");C_NRM();}else if(ext2_vfs_mount(mp)<0){C_ERR();con_writeln("ext2 vfs: attach failed");C_NRM();}else{C_OK();cprintf("ext2 vfs: attached at %s (read-only until ext2 rw on)\n",mp);C_NRM();}}
+            else if(!kstrcmp(argv[2],"off")){if(ext2_vfs_unmount()<0){C_ERR();con_writeln("ext2 vfs: detach refused; close Ext2 VFS descriptors first");C_NRM();}else{C_OK();con_writeln("ext2 vfs: detached");C_NRM();}}
+            else {C_ERR();con_writeln("ext2 vfs: on [absolute-path] | off | status");C_NRM();}
+        }
         else if(!kstrcmp(argv[1],"status")){if(!ext2.mounted)con_writeln("ext2: not mounted");else cprintf("ext2: hd%d part%d, block %u, groups %u, volume '%s', %s\n",ext2.drive,ext2.part,ext2.block_size,ext2.groups,ext2.volume_name,ext2.write_enabled?"guarded direct-block write":"read-only");}
         else if(!kstrcmp(argv[1],"info")){if(!ext2.mounted)con_writeln("ext2: not mounted");else cprintf("ext2 info: blocks %u (%u free), inodes %u (%u free), incompat 0x%x, state 0x%x, %s\n",ext2.blocks_count,ext2.free_blocks,ext2.inodes_count,ext2.free_inodes,ext2.feature_incompat,ext2.fs_state,ext2.write_enabled?"guarded write":"read-only");}
+        else if(!kstrcmp(argv[1],"vfstest")&&argc>=3){
+            const char *path=argv[2];
+            if(!ext2_vfs_is_mounted()||kstrncmp(path,"/mnt/ext2/",10)){C_ERR();con_writeln("ext2 vfstest: attach default /mnt/ext2 first");C_NRM();}
+            else {int fd=vfs_open(path,O_RDONLY,0);if(fd<0){C_ERR();con_writeln("ext2 vfstest: open denied");C_NRM();}else{int r=ext2_vfs_unmount();vfs_close(fd);if(r!=-EBUSY||!ext2_vfs_is_mounted()){C_ERR();con_writeln("ext2 vfstest: busy-detach invariant failed");C_NRM();}else{C_OK();con_writeln("ext2 vfstest: busy-detach guard ok");C_NRM();}}}
+        }
+        else if(!kstrcmp(argv[1],"vfswrite")&&argc>=4){
+            const char *path=argv[2];uint32_t off=argc>=5?(uint32_t)kstrtoi(argv[3]):0;const char *text=argc>=5?argv[4]:argv[3];size_t len=kstrlen(text);
+            if(!ext2_vfs_is_mounted()||kstrncmp(path,"/mnt/ext2/",10)){C_ERR();con_writeln("ext2 vfswrite: attach default /mnt/ext2 first");C_NRM();}
+            else {int fd=vfs_open(path,O_WRONLY,0);if(fd<0||vfs_lseek(fd,(int64_t)off,SEEK_SET)<0){if(fd>=0)vfs_close(fd);C_ERR();con_writeln("ext2 vfswrite: open/seek denied");C_NRM();}else{int64_t n=vfs_write(fd,text,len);vfs_close(fd);if(n!=(int64_t)len){C_ERR();cprintf("ext2 vfswrite: denied/short write (%d)\n",(int)n);C_NRM();}else{C_OK();cprintf("ext2 vfswrite: wrote %u bytes through VFS\n",(uint32_t)n);C_NRM();}}}
+        }
         else if(!kstrcmp(argv[1],"rw")&&argc>=3){int en=!kstrcmp(argv[2],"on");if((!en&&kstrcmp(argv[2],"off"))||ext2_set_write_enabled(en)<0){C_ERR();cprintf("ext2: write guard: %s\n",ext2_last_error());C_NRM();}else {C_OK();cprintf("ext2: %s\n",en?"guarded direct-block write enabled":"read-only guard restored");C_NRM();}}
         else if(!kstrcmp(argv[1],"write")&&argc>=5){size_t n=0;if(ext2_write_range(argv[2],(uint32_t)kstrtoi(argv[3]),(const uint8_t*)argv[4],kstrlen(argv[4]),&n)<0){C_ERR();cprintf("ext2: write denied: %s\n",ext2_last_error());C_NRM();}else {C_OK();cprintf("ext2: wrote %u bytes in-place\n",(uint32_t)n);C_NRM();}}
         else if(!kstrcmp(argv[1],"ls")){
@@ -2926,7 +2948,7 @@ void dispatch(char *line) {
             static uint8_t data[129];size_t n=0;uint32_t off=(uint32_t)kstrtoi(argv[3]);
             if(ext2_read_range(argv[2],off,data,sizeof(data)-1,&n)<0){C_ERR();con_writeln("ext2: range read failed");C_NRM();}
             else {data[n]=0;con_write((char*)data);con_writeln("");}
-        } else con_writeln("ext2: mount <drive> <part> | info | status | rw <on|off> | write <path> <offset> <text> | ls [-l] [path] | stat <path> | readlink <path> | cat <path> | catrange <path> <byte> | umount");
+        } else con_writeln("ext2: mount <drive> <part> | vfs <on [path]|off|status> | vfstest <path> | vfswrite <path> [offset] <text> | info | status | rw <on|off> | write <path> <offset> <text> | ls [-l] [path] | stat <path> | readlink <path> | cat <path> | catrange <path> <byte> | umount");
     }
     else if (!kstrcmp(cmd,"fat32")) {
         if (!fat32.mounted) {

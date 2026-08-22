@@ -24,17 +24,8 @@ static uint32_t *posix_umask_slot(void){
 /* Canonical lexical path resolution. VFS still resolves symlinks itself;
  * this intentionally normalizes only separators, '.' and '..' so every
  * portable wrapper observes the same per-task cwd semantics. */
-static int posix_abspath(const char *path,char out[VFS_PATH_MAX]){
-    char raw[VFS_PATH_MAX];const char *cwd=posix_cwd_slot();
-    if(!path||!path[0])return -1;
-    if(path[0]=='/'){
-        if(kstrlen(path)>=sizeof(raw))return -1;
-        kstrcpy(raw,path);
-    }else{
-        if(kstrlen(cwd)+1+kstrlen(path)>=sizeof(raw))return -1;
-        kstrcpy(raw,cwd);if(raw[kstrlen(raw)-1]!='/')kstrcat(raw,"/");kstrcat(raw,path);
-    }
-    out[0]='/';out[1]=0;const char *p=raw;
+static int posix_normalize(const char *raw,char out[VFS_PATH_MAX]){
+    if(!raw||raw[0]!='/')return -1;out[0]='/';out[1]=0;const char *p=raw;
     while(*p){
         while(*p=='/')p++;
         if(!*p)break;
@@ -53,6 +44,18 @@ static int posix_abspath(const char *path,char out[VFS_PATH_MAX]){
     }
     return 0;
 }
+static int posix_basepath(const char *base,const char *path,char out[VFS_PATH_MAX]){
+    char raw[VFS_PATH_MAX];if(!path||!path[0]||!base||base[0]!='/')return -1;
+    if(path[0]=='/'){if(kstrlen(path)>=sizeof(raw))return -1;kstrcpy(raw,path);}
+    else{if(kstrlen(base)+1+kstrlen(path)>=sizeof(raw))return -1;kstrcpy(raw,base);if(raw[kstrlen(raw)-1]!='/')kstrcat(raw,"/");kstrcat(raw,path);}
+    return posix_normalize(raw,out);
+}
+static int posix_abspath(const char *path,char out[VFS_PATH_MAX]){return posix_basepath(posix_cwd_slot(),path,out);}
+static int posix_atpath(int dirfd,const char *path,char out[VFS_PATH_MAX]){
+    if(dirfd==ATM_POSIX_AT_FDCWD)return posix_abspath(path,out);
+    char base[VFS_PATH_MAX];vfs_stat_t st;if(vfs_fd_path(dirfd,base,sizeof(base))<0||vfs_fstat(dirfd,&st)<0||!S_ISDIR(st.st_mode))return -1;
+    return posix_basepath(base,path,out);
+}
 
 int atm_posix_open(const char *path,uint32_t flags,uint32_t mode){
     char full[VFS_PATH_MAX];if(posix_abspath(path,full)<0)return -1;
@@ -60,6 +63,7 @@ int atm_posix_open(const char *path,uint32_t flags,uint32_t mode){
     return vfs_open(full,flags,mode);
 }
 int atm_posix_creat(const char *path,uint32_t mode){return atm_posix_open(path,O_WRONLY|O_CREAT|O_TRUNC,mode);}
+int atm_posix_openat(int dirfd,const char *path,uint32_t flags,uint32_t mode){char full[VFS_PATH_MAX];if(posix_atpath(dirfd,path,full)<0)return -1;if(flags&O_CREAT)mode&=~(*posix_umask_slot());return vfs_open(full,flags,mode);}
 int atm_posix_close(int fd){if(fd<0)return -1;vfs_close(fd);return 0;}
 int64_t atm_posix_read(int fd,void *buf,uint64_t count){return vfs_read(fd,buf,count);}
 int64_t atm_posix_write(int fd,const void *buf,uint64_t count){return vfs_write(fd,buf,count);}
@@ -93,6 +97,7 @@ int64_t atm_posix_lseek(int fd,int64_t offset,int whence){return vfs_lseek(fd,of
 int atm_posix_stat(const char *path,atm_posix_stat_t *st){char full[VFS_PATH_MAX];return posix_abspath(path,full)<0?-1:vfs_stat(full,st);}
 int atm_posix_lstat(const char *path,atm_posix_stat_t *st){char full[VFS_PATH_MAX];return posix_abspath(path,full)<0?-1:vfs_lstat(full,st);}
 int atm_posix_fstat(int fd,atm_posix_stat_t *st){return vfs_fstat(fd,st);}
+int atm_posix_fstatat(int dirfd,const char *path,atm_posix_stat_t *st,uint32_t flags){char full[VFS_PATH_MAX];if(!st||(flags&~ATM_POSIX_AT_SYMLINK_NOFOLLOW)||posix_atpath(dirfd,path,full)<0)return -1;return (flags&ATM_POSIX_AT_SYMLINK_NOFOLLOW)?vfs_lstat(full,st):vfs_stat(full,st);}
 int atm_posix_fchmod(int fd,uint32_t mode){return vfs_fchmod(fd,mode);}
 int atm_posix_fchown(int fd,uint32_t uid,uint32_t gid){return vfs_fchown(fd,uid,gid);}
 int atm_posix_dup(int fd){return vfs_dup(fd);}
@@ -101,9 +106,13 @@ int atm_posix_truncate(const char *path,uint64_t size){char full[VFS_PATH_MAX];r
 int atm_posix_ftruncate(int fd,uint64_t size){return vfs_ftruncate(fd,size);}
 int atm_posix_chmod(const char *path,uint32_t mode){char full[VFS_PATH_MAX];return posix_abspath(path,full)<0?-1:vfs_chmod(full,mode);}
 int atm_posix_chown(const char *path,uint32_t uid,uint32_t gid){char full[VFS_PATH_MAX];return posix_abspath(path,full)<0?-1:vfs_chown(full,uid,gid);}
+int atm_posix_fchmodat(int dirfd,const char *path,uint32_t mode,uint32_t flags){char full[VFS_PATH_MAX];return flags||posix_atpath(dirfd,path,full)<0?-1:vfs_chmod(full,mode);}
+int atm_posix_fchownat(int dirfd,const char *path,uint32_t uid,uint32_t gid,uint32_t flags){char full[VFS_PATH_MAX];return flags||posix_atpath(dirfd,path,full)<0?-1:vfs_chown(full,uid,gid);}
 int atm_posix_mkdir(const char *path,uint32_t mode){char full[VFS_PATH_MAX];if(posix_abspath(path,full)<0)return -1;return vfs_mkdir(full,mode&~(*posix_umask_slot()));}
+int atm_posix_mkdirat(int dirfd,const char *path,uint32_t mode){char full[VFS_PATH_MAX];if(posix_atpath(dirfd,path,full)<0)return -1;return vfs_mkdir(full,mode&~(*posix_umask_slot()));}
 int atm_posix_rmdir(const char *path){char full[VFS_PATH_MAX];return posix_abspath(path,full)<0?-1:vfs_rmdir(full);}
 int atm_posix_unlink(const char *path){char full[VFS_PATH_MAX];return posix_abspath(path,full)<0?-1:vfs_unlink(full);}
+int atm_posix_unlinkat(int dirfd,const char *path,uint32_t flags){char full[VFS_PATH_MAX];if(posix_atpath(dirfd,path,full)<0)return -1;return flags==0?vfs_unlink(full):(flags==ATM_POSIX_AT_REMOVEDIR?vfs_rmdir(full):-1);}
 int atm_posix_chdir(const char *path){char full[VFS_PATH_MAX];vfs_stat_t st;if(posix_abspath(path,full)<0||vfs_stat(full,&st)<0||!S_ISDIR(st.st_mode))return -1;kstrcpy(posix_cwd_slot(),full);return 0;}
 int atm_posix_fchdir(int fd){
     char path[VFS_PATH_MAX];vfs_stat_t st;
@@ -111,16 +120,26 @@ int atm_posix_fchdir(int fd){
     kstrcpy(posix_cwd_slot(),path);return 0;
 }
 char *atm_posix_getcwd(char *buf,size_t size){char *cwd=posix_cwd_slot();if(!buf||size<=kstrlen(cwd))return NULL;kstrcpy(buf,cwd);return buf;}
-int atm_posix_access(const char *path,int mode){char full[VFS_PATH_MAX];vfs_stat_t st;if(posix_abspath(path,full)<0||vfs_stat(full,&st)<0)return -1;if(mode==ATM_POSIX_F_OK)return 0;uint32_t perm=(vfs_current_uid()==st.st_uid)?((st.st_mode>>6)&7):((vfs_current_gid()==st.st_gid)?((st.st_mode>>3)&7):(st.st_mode&7));if((mode&ATM_POSIX_R_OK)&&!(perm&4))return -1;if((mode&ATM_POSIX_W_OK)&&!(perm&2))return -1;if((mode&ATM_POSIX_X_OK)&&!(perm&1))return -1;return 0;}
+static int posix_access_full(const char *full,int mode){
+    vfs_stat_t st;if(!full||(mode&~(ATM_POSIX_R_OK|ATM_POSIX_W_OK|ATM_POSIX_X_OK))||vfs_stat(full,&st)<0)return -1;
+    if(mode==ATM_POSIX_F_OK)return 0;uint32_t perm=(vfs_current_uid()==st.st_uid)?((st.st_mode>>6)&7):((vfs_current_gid()==st.st_gid)?((st.st_mode>>3)&7):(st.st_mode&7));
+    if((mode&ATM_POSIX_R_OK)&&!(perm&4))return -1;if((mode&ATM_POSIX_W_OK)&&!(perm&2))return -1;if((mode&ATM_POSIX_X_OK)&&!(perm&1))return -1;return 0;
+}
+int atm_posix_access(const char *path,int mode){char full[VFS_PATH_MAX];return posix_abspath(path,full)<0?-1:posix_access_full(full,mode);}
+int atm_posix_faccessat(int dirfd,const char *path,int mode,uint32_t flags){char full[VFS_PATH_MAX];return flags||posix_atpath(dirfd,path,full)<0?-1:posix_access_full(full,mode);}
 uint32_t atm_posix_umask(uint32_t newmask){uint32_t *slot=posix_umask_slot(),old=*slot;*slot=newmask&0777;return old;}
 int atm_posix_isatty(int fd){return fd>=0&&fd<=2;}
 atm_posix_dir_t *atm_posix_opendir(const char *path){char full[VFS_PATH_MAX];return posix_abspath(path,full)<0?NULL:vfs_opendir(full);}
 atm_posix_dirent_t *atm_posix_readdir(atm_posix_dir_t *dir){return vfs_readdir_next(dir);}
 int atm_posix_closedir(atm_posix_dir_t *dir){if(!dir)return -1;vfs_closedir(dir);return 0;}
 int atm_posix_rename(const char *oldpath,const char *newpath){char a[VFS_PATH_MAX],b[VFS_PATH_MAX];return posix_abspath(oldpath,a)<0||posix_abspath(newpath,b)<0?-1:vfs_rename(a,b);}
+int atm_posix_renameat(int olddirfd,const char *oldpath,int newdirfd,const char *newpath){char a[VFS_PATH_MAX],b[VFS_PATH_MAX];return posix_atpath(olddirfd,oldpath,a)<0||posix_atpath(newdirfd,newpath,b)<0?-1:vfs_rename(a,b);}
+int atm_posix_linkat(int olddirfd,const char *oldpath,int newdirfd,const char *newpath,uint32_t flags){char a[VFS_PATH_MAX],b[VFS_PATH_MAX];return flags||posix_atpath(olddirfd,oldpath,a)<0||posix_atpath(newdirfd,newpath,b)<0?-1:vfs_link(a,b);}
+int atm_posix_symlinkat(const char *target,int newdirfd,const char *linkpath){char full[VFS_PATH_MAX];return !target||posix_atpath(newdirfd,linkpath,full)<0?-1:vfs_symlink(target,full);}
 int atm_posix_link(const char *oldpath,const char *newpath){char a[VFS_PATH_MAX],b[VFS_PATH_MAX];return posix_abspath(oldpath,a)<0||posix_abspath(newpath,b)<0?-1:vfs_link(a,b);}
 int atm_posix_symlink(const char *target,const char *linkpath){char full[VFS_PATH_MAX];return posix_abspath(linkpath,full)<0?-1:vfs_symlink(target,full);}
 int atm_posix_readlink(const char *path,char *buf,size_t size){char full[VFS_PATH_MAX];return posix_abspath(path,full)<0?-1:vfs_readlink(full,buf,size);}
+int atm_posix_readlinkat(int dirfd,const char *path,char *buf,size_t size){char full[VFS_PATH_MAX];return posix_atpath(dirfd,path,full)<0?-1:vfs_readlink(full,buf,size);}
 static int64_t posix_path_limit(int name){switch(name){case ATM_POSIX_PC_NAME_MAX:return VFS_NAME_MAX;case ATM_POSIX_PC_PATH_MAX:return VFS_PATH_MAX-1;case ATM_POSIX_PC_LINK_MAX:return VFS_LINK_MAX;default:return -1;}}
 int64_t atm_posix_pathconf(const char *path,int name){char full[VFS_PATH_MAX];vfs_stat_t st;if(posix_abspath(path,full)<0||vfs_stat(full,&st)<0)return -1;return posix_path_limit(name);}
 int64_t atm_posix_fpathconf(int fd,int name){vfs_stat_t st;if(vfs_fstat(fd,&st)<0)return -1;return posix_path_limit(name);}
@@ -134,7 +153,7 @@ int atm_posix_getsid(int32_t pid){return task_getsid(pid);}
 int atm_posix_selftest(void){
     char saved[VFS_PATH_MAX],cwd[VFS_PATH_MAX],readback[8]={0};
     if(!atm_posix_getcwd(saved,sizeof(saved)))return -1;
-    uint32_t oldmask=atm_posix_umask(0022);int rc=-1,fd=-1;const char *root="/tmp/.atm-posix-test";
+    uint32_t oldmask=atm_posix_umask(0022);int rc=-1,fd=-1,dfd=-1,afd=-1;const char *root="/tmp/.atm-posix-test";
     (void)vfs_mkdir(root,0700);if(atm_posix_chdir(root)<0)goto done;
     if(atm_posix_mkdir("nest",0777)<0)goto done;
     if(atm_posix_chdir("nest/../.")<0||!atm_posix_getcwd(cwd,sizeof(cwd))||kstrcmp(cwd,root))goto done;
@@ -148,16 +167,25 @@ int atm_posix_selftest(void){
     if(atm_posix_readv(fd,in,2)!=3||readback[0]!='o'||readback[1]!='k'||readback[2]!='!')goto done;
     if(atm_posix_access("io",ATM_POSIX_R_OK)<0||atm_posix_pathconf("io",ATM_POSIX_PC_NAME_MAX)!=VFS_NAME_MAX||atm_posix_fpathconf(fd,ATM_POSIX_PC_PATH_MAX)!=(VFS_PATH_MAX-1)||atm_posix_pathconf("io",99)>=0)goto done;
     atm_posix_close(fd);fd=-1;
+    dfd=atm_posix_open(".",O_RDONLY|O_DIRECTORY,0);if(dfd<0)goto done;
+    afd=atm_posix_openat(dfd,"at-io",O_RDWR|O_CREAT|O_TRUNC,0600);if(afd<0||atm_posix_write(afd,"at",2)!=2)goto done;
+    atm_posix_close(afd);afd=-1;atm_posix_stat_t ast;
+    char atlink[8]={0};
+    if(atm_posix_fchmodat(dfd,"at-io",0640,0)<0||atm_posix_fchownat(dfd,"at-io",0,0,0)<0||atm_posix_fstatat(dfd,"at-io",&ast,0)<0||ast.st_size!=2||(ast.st_mode&0777)!=0640||atm_posix_faccessat(dfd,"at-io",ATM_POSIX_R_OK,0)<0||atm_posix_mkdirat(dfd,"at-dir",0700)<0)goto done;
+    if(atm_posix_linkat(dfd,"at-io",dfd,"at-hard",0)<0||atm_posix_symlinkat("at-io",dfd,"at-sym")<0||atm_posix_readlinkat(dfd,"at-sym",atlink,sizeof(atlink))!=5||kstrcmp(atlink,"at-io"))goto done;
+    if(atm_posix_linkat(dfd,"at-io",dfd,"at-no",1)>=0||atm_posix_faccessat(dfd,"at-io",ATM_POSIX_R_OK,1)>=0||atm_posix_fchmodat(dfd,"at-io",0600,1)>=0||atm_posix_fchownat(dfd,"at-io",0,0,1)>=0)goto done;
+    if(atm_posix_unlinkat(dfd,"at-hard",0)<0||atm_posix_unlinkat(dfd,"at-sym",0)<0||atm_posix_renameat(dfd,"at-io",dfd,"at-renamed")<0||atm_posix_unlinkat(dfd,"at-renamed",0)<0||atm_posix_unlinkat(dfd,"at-dir",ATM_POSIX_AT_REMOVEDIR)<0)goto done;
+    atm_posix_close(dfd);dfd=-1;
     if(atm_posix_getpgid(0)<0||atm_posix_getsid(0)<0)goto done;
     atm_posix_dir_t *d=atm_posix_opendir(".");if(!d)goto done;int saw=0;atm_posix_dirent_t *e;while((e=atm_posix_readdir(d)))if(!kstrcmp(e->name,"io")){saw=1;break;}atm_posix_closedir(d);if(!saw)goto done;
     rc=0;
 done:
-    if(fd>=0)atm_posix_close(fd);(void)atm_posix_unlink("io");(void)atm_posix_chdir(saved);(void)vfs_rmdir("/tmp/.atm-posix-test/nest");(void)vfs_rmdir(root);atm_posix_umask(oldmask);return rc;
+    if(afd>=0)atm_posix_close(afd);if(dfd>=0)atm_posix_close(dfd);if(fd>=0)atm_posix_close(fd);(void)atm_posix_unlink("at-renamed");(void)atm_posix_unlink("at-hard");(void)atm_posix_unlink("at-sym");(void)atm_posix_unlink("at-io");(void)atm_posix_rmdir("at-dir");(void)atm_posix_unlink("io");(void)atm_posix_chdir(saved);(void)vfs_rmdir("/tmp/.atm-posix-test/nest");(void)vfs_rmdir(root);atm_posix_umask(oldmask);return rc;
 }
 
 uint32_t atm_posix_features(void){
     return ATM_POSIX_FILES|ATM_POSIX_UIDGID|ATM_POSIX_PATHS|ATM_POSIX_FD|
            ATM_POSIX_META|ATM_POSIX_LINKS|ATM_POSIX_TRUNC|ATM_POSIX_DIR|
            ATM_POSIX_CWD|ATM_POSIX_ACCESS|ATM_POSIX_TTY|ATM_POSIX_IOV|
-           ATM_POSIX_SYNC|ATM_POSIX_TASKCTX|ATM_POSIX_TIME|ATM_POSIX_SELECT|ATM_POSIX_SESSION|ATM_POSIX_LIMITS;
+           ATM_POSIX_SYNC|ATM_POSIX_TASKCTX|ATM_POSIX_TIME|ATM_POSIX_SELECT|ATM_POSIX_SESSION|ATM_POSIX_LIMITS|ATM_POSIX_AT;
 }

@@ -862,6 +862,12 @@ int vfs_unmount(const char *path) {
     return -ENOENT;
 }
 
+int vfs_fsops_busy(const vfs_fsops_t *ops){
+    if(!ops)return 0;
+    for(int i=0;i<FD_MAX;i++)if(g_fds[i].used&&g_fds[i].inode&&g_fds[i].inode->ops==ops)return 1;
+    return 0;
+}
+
 vfs_inode_t *vfs_root(void) { return g_root; }
 
 /* ── Path resolution ─────────────────────────────────────── */

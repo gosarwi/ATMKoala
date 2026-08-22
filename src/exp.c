@@ -83,6 +83,8 @@ static int screenshot_state_selftest(void);
 static int wallpaper_state_selftest(void);
 static int clock_zone_state_selftest(void);
 static int fm_name_contains(const char *name,const char *needle);
+static int palette_match(const char *text,const char *query);
+static int paint_nearest_color(uint8_t r,uint8_t g,uint8_t b);
 static void gui_context(exp_gui_context_t *ctx,exp_win_t *w){ctx->window_id=w->id;ctx->x=w->x+2;ctx->y=w->y+DE_TITLEBAR_H+1;ctx->width=w->w-4;ctx->height=w->h-DE_TITLEBAR_H-3;ctx->scale_percent=exp_ui_scale_pct;ctx->fg=C_TEXT;ctx->bg=C_BASE;ctx->state=(w->ext_slot>=0&&w->ext_slot<gui_app_count)?gui_apps[w->ext_slot].state:NULL;}
 void exp_gui_fill(exp_gui_context_t *ctx,int x,int y,int w,int h,color32_t c){if(ctx)vbe_fill_rect(EXP_SCALE(ctx->x+x),EXP_SCALE(ctx->y+y),EXP_SCALE(w),EXP_SCALE(h),c);}
 void exp_gui_frame(exp_gui_context_t *ctx,int x,int y,int w,int h,color32_t c){if(ctx)vbe_draw_rect(EXP_SCALE(ctx->x+x),EXP_SCALE(ctx->y+y),EXP_SCALE(w),EXP_SCALE(h),c);}
@@ -113,6 +115,8 @@ int exp_text_layout_selftest(void){
     static const uint8_t ppm_magic[]={'P','6','\n','1',' ','1','\n','2','5','5','\n',0,0,0};
     if(tzst_installed_at(0,NULL,0,NULL,0,NULL,0)!=-1||tzst_installed_description_at(0,NULL,0)!=-1)return -1;
     if(!fm_name_contains("atmkoala-01.ppm","koala")||fm_name_contains("atmkoala-01.ppm","jpeg")||fmt_detect(ppm_magic,sizeof(ppm_magic),"fixture.ppm")!=FMT_PPM)return -1;
+    if(!palette_match("System Information","info")||!palette_match("Paint","PA")||palette_match("Terminal","xyz"))return -1;
+    if(paint_nearest_color((uint8_t)(C_RED>>16),(uint8_t)(C_RED>>8),(uint8_t)C_RED)!=2)return -1;
     return 0;
 }
 #define CX(w) ((w)->x+2)
@@ -281,6 +285,9 @@ static void draw_taskbar(void){
     color32_t mc=DE.launcher_open?C_TEXT:C_SUBTEXT;R(12,ty+8,5,5,mc);R(19,ty+8,5,5,mc);R(12,ty+15,5,5,mc);R(19,ty+15,5,5,mc);
     T(31,ty+6,"Menu",mc,lb);
     int tray_left=DE_SCR_W-182;
+    /* The small desk glyph toggles only windows minimized by Ctrl+D/click. */
+    int dx=tray_left-26; color32_t db=DE.show_desktop_active?C_SURFACE2:C_SURFACE1;
+    RR(dx,ty+5,20,DE_TASKBAR_H-10,db);R(dx+5,ty+9,10,3,C_SUBTEXT);R(dx+7,ty+13,8,5,C_SUBTEXT);
     int wx=84;
     for(int i=0;i<DE.win_count;i++){
         if(wx+104>tray_left) break;
@@ -807,7 +814,7 @@ static void draw_files(exp_win_t *w){
     }
     HL(cx,cy+ch-16,cw2,C_SURFACE0);
     R(cx,cy+ch-15,cw2,15,C_MANTLE);
-    if(w->fm_search_edit){char findline[64];ksnprintf(findline,sizeof(findline),"Find filename: %s_  Enter next  Esc cancel",w->fm_search);T(cx+4,cy+ch-14,findline,C_YELLOW,C_MANTLE);}else T(cx+4,cy+ch-14,"Enter=open  F=find  I=properties  N=new folder  T=trash  R=trash",C_SUBTEXT,C_MANTLE);
+    if(w->fm_search_edit){char findline[64];ksnprintf(findline,sizeof(findline),"Find filename: %s_  Enter next  Esc cancel",w->fm_search);T(cx+4,cy+ch-14,findline,C_YELLOW,C_MANTLE);}else T(cx+4,cy+ch-14,"Enter=view  O=PPM Paint  F=find  I=properties  N=new  T=trash  R=Trash",C_SUBTEXT,C_MANTLE);
 }
 
 static int fm_selected_path(exp_win_t *w,char out[128]){
@@ -903,6 +910,7 @@ static void fm_key(exp_win_t *w, int k){
     if(k=='r'||k=='R'){fm_open_trash(w);return;}
     if(k=='f'||k=='F'){w->fm_search[0]=0;w->fm_search_len=0;w->fm_search_edit=1;return;}
     if(k=='i'||k=='I'){w->fm_details=!w->fm_details;return;}
+    if(k=='o'||k=='O'){char fp[128];if(fm_selected_path(w,fp)<0||w->fm_ent[w->fm_sel].is_dir){exp_notify("Select a PPM P6 file for Paint import",C_YELLOW);return;}if(fmt_detect(NULL,0,fp)!=FMT_PPM){exp_notify("Paint import accepts native PPM P6 only",C_YELLOW);return;}if(exp_open_app(APP_PAINT,fp)<0)exp_notify("No free window for Paint import",C_RED);return;}
     if(k=='\b'){
         char *last=w->fm_path, *p=w->fm_path;
         while(*p){if(*p=='/')last=p;p++;}
@@ -1046,7 +1054,8 @@ static void draw_sysinfo(exp_win_t *w){
     T(cx+12,y,"DEVICES / RUNTIME",C_PEACH,C_BASE);y+=16;
     ksnprintf(line,sizeof(line),"ATA disks: %u  reads %u  writes %u  I/O errors %u",disk_count,disk_read_ops,disk_write_ops,disk_io_errors);T(cx+20,y,line,C_SUBTEXT,C_BASE);y+=15;
     ksnprintf(line,sizeof(line),"Network stack: %s  |  Wi-Fi controller: %s  driver: %s  associated: %s",net.initialized?"initialized":"unavailable",g_radio.wifi_controller_present?"detected":"none",g_radio.wifi_driver_ready?"ready":"no",g_radio.wifi_connected?"yes":"no");TC(cx+20,y,line,C_SUBTEXT,C_BASE,cw2-32);y+=15;
-    ksnprintf(line,sizeof(line),"Battery: %s  |  Bluetooth controller: %s  driver: %s",g_battery.valid?(g_battery.present?"present":"not present"):"unavailable",g_radio.bluetooth_controller_present?"detected":"none",g_radio.bluetooth_driver_ready?"ready":"no");T(cx+20,y,line,C_SUBTEXT,C_BASE);y+=20;
+    ksnprintf(line,sizeof(line),"Battery: %s  |  Bluetooth controller: %s  driver: %s",g_battery.valid?(g_battery.present?"present":"not present"):"unavailable",g_radio.bluetooth_controller_present?"detected":"none",g_radio.bluetooth_driver_ready?"ready":"no");T(cx+20,y,line,C_SUBTEXT,C_BASE);y+=15;
+    ksnprintf(line,sizeof(line),"VBE: %ux%u %u-bpp  |  present: %s",vbe.width,vbe.height,vbe.bpp,!vbe_double_buffer_active()?"direct fallback":(vbe_double_buffer_uses_static()?"reserved full-frame buffer":"heap full-frame buffer"));T(cx+20,y,line,C_SUBTEXT,C_BASE);y+=20;
     T(cx+12,cy+ch-20,"Read-only snapshot. Detection does not imply a complete native driver or hardware acceleration.",C_OVERLAY0,C_BASE);
 }
 static void draw_eventlog(exp_win_t *w){
@@ -1076,7 +1085,7 @@ static void draw_packages(exp_win_t *w){int cx=CX(w),cy=CY(w),cw2=CW(w),ch=CH(w)
 static void packages_key(exp_win_t *w,int k){if(k==KEY_UP&&w->package_scroll>0)w->package_scroll--;else if(k==KEY_DOWN)w->package_scroll++;else if(k==KEY_PGUP){w->package_scroll-=6;if(w->package_scroll<0)w->package_scroll=0;}else if(k==KEY_PGDN)w->package_scroll+=6;}
 static void diag_run(exp_win_t *w){w->diag_rc[0]=net_udp_selftest();w->diag_rc[1]=ntp_selftest();w->diag_rc[2]=tzif_selftest();w->diag_rc[3]=rtc_write_selftest();w->diag_rc[4]=mouse_packet_selftest();w->diag_rc[5]=tzst_repo_selftest();w->diag_done=1;int bad=0;for(int i=0;i<6;i++)if(w->diag_rc[i]<0)bad++;exp_notify(bad?"Self-test dashboard: failures found":"Self-test dashboard: all checks passed",bad?C_RED:C_GREEN);}
 static int diag_write_line(int fd,const char *line){uint32_t n=(uint32_t)kstrlen(line);return vfs_write(fd,(const uint8_t*)line,n)==(int64_t)n?0:-1;}
-static void diag_export(exp_win_t *w){if(!catfs_vfs_is_mounted()){exp_notify("Diagnostic export needs mounted CatFS /data",C_RED);return;}(void)vfs_mkdir("/data/uiu",0755);(void)vfs_mkdir("/data/uiu/reports",0755);char path[128],line[192],num[16];int fd=-1;for(int n=1;n<=99;n++){kstrcpy(path,"/data/uiu/reports/diagnostics-");if(n<10)kstrcat(path,"0");kuitoa((uint32_t)n,num,10);kstrcat(path,num);kstrcat(path,".txt");fd=vfs_open(path,O_WRONLY|O_CREAT|O_EXCL,0644);if(fd>=0)break;}if(fd<0){exp_notify("No free diagnostic report slot",C_RED);return;}int bad=0;ksnprintf(line,sizeof(line),"ATMKoala diagnostic report\nUptime ticks: %u\nCatFS /data: mounted\nDetected ATA drives: %d\nUserNet state: %s\n",sched_uptime_ticks(),disk_count,unm_state_text(g_unm.state));if(diag_write_line(fd,line)<0)bad=1;for(int i=0;i<6&&!bad;i++){ksnprintf(line,sizeof(line),"Selftest %d: %s\n",i+1,!w->diag_done?"not-run":(w->diag_rc[i]<0?"failed":"passed"));if(diag_write_line(fd,line)<0)bad=1;}vfs_close(fd);if(bad){(void)vfs_unlink(path);exp_notify("Diagnostic export failed; partial removed",C_RED);return;}w->diag_export_count++;kstrcpy(line,"Diagnostic report saved: ");kstrcat(line,path);exp_notify(line,C_GREEN);}
+static void diag_export(exp_win_t *w){if(!catfs_vfs_is_mounted()){exp_notify("Diagnostic export needs mounted CatFS /data",C_RED);return;}(void)vfs_mkdir("/data/uiu",0755);(void)vfs_mkdir("/data/uiu/reports",0755);char path[128],line[256],num[16];int fd=-1;for(int n=1;n<=99;n++){kstrcpy(path,"/data/uiu/reports/diagnostics-");if(n<10)kstrcat(path,"0");kuitoa((uint32_t)n,num,10);kstrcat(path,num);kstrcat(path,".txt");fd=vfs_open(path,O_WRONLY|O_CREAT|O_EXCL,0644);if(fd>=0)break;}if(fd<0){exp_notify("No free diagnostic report slot",C_RED);return;}int bad=0;ksnprintf(line,sizeof(line),"ATMKoala diagnostic report\nUptime ticks: %u\nCatFS /data: mounted\nDetected ATA drives: %d\nUserNet state: %s\nVBE: %ux%u %u-bpp present=%s\n",sched_uptime_ticks(),disk_count,unm_state_text(g_unm.state),vbe.width,vbe.height,vbe.bpp,!vbe_double_buffer_active()?"direct":(vbe_double_buffer_uses_static()?"reserved":"heap"));if(diag_write_line(fd,line)<0)bad=1;for(int i=0;i<6&&!bad;i++){ksnprintf(line,sizeof(line),"Selftest %d: %s\n",i+1,!w->diag_done?"not-run":(w->diag_rc[i]<0?"failed":"passed"));if(diag_write_line(fd,line)<0)bad=1;}vfs_close(fd);if(bad){(void)vfs_unlink(path);exp_notify("Diagnostic export failed; partial removed",C_RED);return;}w->diag_export_count++;kstrcpy(line,"Diagnostic report saved: ");kstrcat(line,path);exp_notify(line,C_GREEN);}
 static void draw_diagnostics(exp_win_t *w){static const char *names[]={"UDP frame parser","NTP reply parser","TZif transition parser","RTC write encoding","PS/2 mouse packet","Package repo parser"};int cx=CX(w),cy=CY(w),cw2=CW(w),ch=CH(w),y=cy+12;R(cx,cy,cw2,ch,C_BASE);T(cx+12,y,"SELF-TEST DASHBOARD",C_LAVENDER,C_BASE);y+=24;T(cx+12,y,"Press R to run bounded non-destructive checks in this window.",C_SUBTEXT,C_BASE);y+=24;for(int i=0;i<6;i++){color32_t c=!w->diag_done?C_OVERLAY0:(w->diag_rc[i]<0?C_RED:C_GREEN);R(cx+12,y+3,9,9,c);BOX(cx+12,y+3,9,9,C_SURFACE2);T(cx+30,y,names[i],C_TEXT,C_BASE);T(cx+300,y,!w->diag_done?"not run":(w->diag_rc[i]<0?"FAILED":"passed"),c,C_BASE);y+=22;}T(cx+12,cy+ch-38,"No network traffic, RTC write, mount/unmount, package install or disk mutation occurs here.",C_OVERLAY0,C_BASE);T(cx+12,cy+ch-20,"R run checks  |  E export status to CatFS  |  It is not a substitute for QEMU/hardware validation.",C_OVERLAY0,C_BASE);}
 static void diagnostics_key(exp_win_t *w,int k){if(k=='r'||k=='R')diag_run(w);else if(k=='e'||k=='E')diag_export(w);}
 static int storage_first_drive(void){for(int i=0;i<DISK_MAX_DRIVES;i++)if(disk_drives[i].present)return i;return -1;}
@@ -1084,7 +1093,7 @@ static int storage_step_drive(int current,int step){for(int n=1;n<=DISK_MAX_DRIV
 static void storage_refresh(exp_win_t *w){w->storage_result=-1;for(int i=0;i<PART_MAX_ENTRIES;i++)kstrcpy(w->storage_fs[i],"-");if(w->storage_drive<0||w->storage_drive>=DISK_MAX_DRIVES||!disk_drives[w->storage_drive].present)return;if(mbr_read(w->storage_drive,&w->storage_mbr)<0)return;w->storage_result=w->storage_mbr.valid?0:-2;if(w->storage_result==0)for(int i=0;i<PART_MAX_ENTRIES;i++)if(w->storage_mbr.entries[i].type)kstrncpy(w->storage_fs[i],mbr_probe_filesystem(w->storage_drive,&w->storage_mbr.entries[i]),sizeof(w->storage_fs[i])-1);}
 static void draw_storage(exp_win_t *w){int cx=CX(w),cy=CY(w),cw2=CW(w),ch=CH(w),y=cy+12;char line[160],num[16];R(cx,cy,cw2,ch,C_BASE);T(cx+12,y,"STORAGE & MBR VIEWER",C_LAVENDER,C_BASE);y+=24;if(w->storage_drive<0){T(cx+12,y,"No detected ATA drive. This view does not probe or write hardware.",C_SUBTEXT,C_BASE);return;}int d=w->storage_drive;kstrcpy(line,"Drive hd");line[8]=(char)('a'+d);line[9]=0;kstrcat(line,"  ");kstrcat(line,disk_drives[d].model[0]?disk_drives[d].model:"ATA Disk");kstrcat(line,"  ");kuitoa(disk_capacity_mib(d),num,10);kstrcat(line,num);kstrcat(line," MiB");T(cx+12,y,line,C_TEXT,C_BASE);y+=22;if(w->storage_result<0){T(cx+12,y,w->storage_result==-2?"MBR signature invalid or absent.":"MBR read failed.",C_RED,C_BASE);T(cx+12,cy+ch-22,"Left/Right choose detected drive  |  R read MBR again  |  Read-only",C_OVERLAY0,C_BASE);return;}T(cx+12,y,"#  Boot  Type                 Start LBA     Sectors       Probe",C_SUBTEXT,C_BASE);y+=20;for(int i=0;i<PART_MAX_ENTRIES;i++){mbr_entry_t *e=&w->storage_mbr.entries[i];if(!e->type){ksnprintf(line,sizeof(line),"%d  -     (empty)",i+1);}else{ksnprintf(line,sizeof(line),"%d  %s  %-20s %-12u %-12u %s",i+1,e->status==0x80?"yes":"no",part_type_name(e->type),e->lba_start,e->sector_count,w->storage_fs[i]);}T(cx+16,y,line,e->type?C_TEXT:C_OVERLAY0,C_BASE);y+=20;}T(cx+12,cy+ch-38,"MBR values and ext2/CatFS signatures are inspection only; no partition editor is present.",C_OVERLAY0,C_BASE);T(cx+12,cy+ch-20,"Left/Right choose detected drive  |  R refresh from sector 0  |  No write operation",C_OVERLAY0,C_BASE);}
 static void storage_key(exp_win_t *w,int k){if(k==KEY_LEFT||k==KEY_RIGHT){int next=storage_step_drive(w->storage_drive,k==KEY_LEFT?-1:1);if(next!=w->storage_drive){w->storage_drive=next;storage_refresh(w);}}else if(k=='r'||k=='R')storage_refresh(w);}
-static void draw_help(exp_win_t *w){static const char *title[]={"DESKTOP & WINDOWS","FILES, VIEWER & NOTEPAD","STORAGE, NETWORK & DIAGNOSTICS","PACKAGE & COMPATIBILITY BOUNDARIES"};static const char *body[][6]={{"Alt+T Terminal   Alt+F Files   Alt+E Notepad   Alt+S Settings","Alt+I Processes   Alt+U Mounts   Alt+N Network   Alt+K Packages","Alt+B Storage/MBR   Alt+D Self-test   Alt+H Help","Ctrl+Alt+Left/Right snap active window; Ctrl+Tab brings next window front.","Windows resize with the bottom-right grip. The desktop has no compositor,","virtual desktops, or generalized shortcut-remapping service."},{"Files: F literal filename find, I read-only properties, N new folder.","C/M/P copy or move regular files only; T moves a CatFS /data item to Trash.","Viewer opens PNG, JPEG, BMP and native PPM P6 screenshots/Paint output.","Notepad: Ctrl+S save, Ctrl+F literal find, Ctrl+G go to line.","Unsaved Notepad/Journal close requires Enter to discard or Esc to cancel.","Searches are bounded to current in-memory directory/document buffers."},{"Storage & MBR is inspection only: it reads sector 0 on an explicitly selected drive.","Mount Manager needs explicit confirmation for unmount. Ext2 mount remains terminal-selected.","Network Profiles changes only saved existing UserNet profiles; C invokes existing connect.","Self-test R executes local parser/input tests. E explicitly writes a text report to CatFS.","No background NTP, wireless scan, automatic repair or hidden disk action is performed.",""},{"Package Details is a read-only native registry view; ArchiveEx performs explicit validated install.","Repository download is bounded clear-text HTTP only: no TLS, redirects, auth or dependency solver.","Ext2 writing stays constrained to guarded existing direct blocks; no allocation or metadata update.","ATMKoala is not POSIX-certified and does not run arbitrary Linux binaries or dynamic glibc/musl apps.","Use the project status document for the authoritative verified compatibility scope.",""}};int cx=CX(w),cy=CY(w),cw2=CW(w),ch=CH(w),page=w->help_page;if(page<0||page>3)page=0;R(cx,cy,cw2,ch,C_BASE);T(cx+12,cy+12,"HELP CENTER",C_LAVENDER,C_BASE);T(cx+12,cy+34,title[page],C_TEXT,C_BASE);int y=cy+62;for(int i=0;i<6;i++){if(!body[page][i][0])continue;TW(cx+14,y,body[page][i],C_SUBTEXT,C_BASE,cw2-28,2);y+=34;}char nav[64];ksnprintf(nav,sizeof(nav),"Page %d/4   Left/Right change page   Esc closes",page+1);T(cx+12,cy+ch-20,nav,C_OVERLAY0,C_BASE);}
+static void draw_help(exp_win_t *w){static const char *title[]={"DESKTOP & WINDOWS","FILES, VIEWER & NOTEPAD","STORAGE, NETWORK & DIAGNOSTICS","PACKAGE & COMPATIBILITY BOUNDARIES"};static const char *body[][6]={{"Alt+T Terminal   Alt+F Files   Alt+E Notepad   Alt+S Settings","Alt+I Processes   Alt+U Mounts   Alt+N Network   Alt+K Packages","Alt+R command palette   Ctrl+W window overview   Ctrl+D show desktop","Ctrl+Alt+Left/Right snap active window; Ctrl+Tab brings next window front.","Windows resize with the bottom-right grip. The desktop has no compositor,","virtual desktops, session restore, shell palette or shortcut remapping service."},{"Files: F literal filename find, I read-only properties, N new folder.","C/M/P copy or move regular files only; T moves a CatFS /data item to Trash.","O opens selected native PPM P6 in Paint; it becomes one 32x18 palette canvas.","Viewer opens PNG, JPEG, BMP and native PPM P6 screenshots/Paint output.","Notepad: Ctrl+S save, Ctrl+F literal find, Ctrl+G go to line.","Searches/imports are bounded to current buffers and documented native formats."},{"Storage & MBR is inspection only: it reads sector 0 on an explicitly selected drive.","System Information reports adopted VBE geometry and reserved/heap/direct present state.","Mount Manager needs explicit confirmation for unmount. Ext2 mount remains terminal-selected.","Network Profiles changes only saved existing UserNet profiles; C invokes existing connect.","Self-test R executes local parser/input tests. E explicitly writes a CatFS report.","No background NTP, wireless scan, automatic repair or hidden disk action is performed."},{"Package Details is a read-only native registry view; ArchiveEx performs explicit validated install.","Repository download is bounded clear-text HTTP only: no TLS, redirects, auth or dependency solver.","Ext2 writing stays constrained to guarded existing direct blocks; no allocation or metadata update.","ATMKoala is not POSIX-certified and does not run arbitrary Linux binaries or dynamic glibc/musl apps.","Use the project status document for the authoritative verified compatibility scope.",""}};int cx=CX(w),cy=CY(w),cw2=CW(w),ch=CH(w),page=w->help_page;if(page<0||page>3)page=0;R(cx,cy,cw2,ch,C_BASE);T(cx+12,cy+12,"HELP CENTER",C_LAVENDER,C_BASE);T(cx+12,cy+34,title[page],C_TEXT,C_BASE);int y=cy+62;for(int i=0;i<6;i++){if(!body[page][i][0])continue;TW(cx+14,y,body[page][i],C_SUBTEXT,C_BASE,cw2-28,2);y+=34;}char nav[64];ksnprintf(nav,sizeof(nav),"Page %d/4   Left/Right change page   Esc closes",page+1);T(cx+12,cy+ch-20,nav,C_OVERLAY0,C_BASE);}
 static void help_key(exp_win_t *w,int k){if(k==KEY_ESC){for(int i=0;i<DE.win_count;i++)if(&DE.wins[i]==w){win_close(i);return;}}else if(k==KEY_LEFT&&w->help_page>0)w->help_page--;else if(k==KEY_RIGHT&&w->help_page<3)w->help_page++;}
 
 /* Screenshots are recorded as raw binary RGB PPM (P6). This format needs no
@@ -1339,6 +1348,14 @@ static void paint_fill(exp_paint_t*p){
 }
 static void paint_clear(exp_paint_t*p){int any=0;for(int y=0;y<EXP_PAINT_H;y++)for(int x=0;x<EXP_PAINT_W;x++)if(p->pixels[y][x])any=1;if(any){paint_snapshot(p);kmemset(p->pixels,0,sizeof(p->pixels));}}
 static void paint_ppm_rgb(uint8_t index,uint8_t out[3]){color32_t c=paint_color(index);out[0]=(uint8_t)(c>>16);out[1]=(uint8_t)(c>>8);out[2]=(uint8_t)c;}
+static int paint_nearest_color(uint8_t r,uint8_t g,uint8_t b){int best=0;uint32_t bestd=0xffffffffu;for(int i=0;i<8;i++){color32_t c=paint_color(i);int dr=(int)r-(int)(uint8_t)(c>>16),dg=(int)g-(int)(uint8_t)(c>>8),db=(int)b-(int)(uint8_t)c;uint32_t d=(uint32_t)(dr*dr+dg*dg+db*db);if(d<bestd){bestd=d;best=i;}}return best;}
+static int paint_import_ppm(exp_win_t*w,const char *path){
+    if(!w||!path||!path[0])return -1;atm_image_t im;kmemset(&im,0,sizeof(im));
+    if(atm_image_decode_file(path,&im)<0||im.format!=ATM_IMAGE_PPM||!im.rgba||im.width<1||im.height<1){ksnprintf(w->paint_status,sizeof(w->paint_status),"Import refused: PPM P6 only (%s).",im.error[0]?im.error:"invalid image");atm_image_release(&im);return -1;}
+    paint_snapshot(&w->paint);
+    for(int y=0;y<EXP_PAINT_H;y++)for(int x=0;x<EXP_PAINT_W;x++){int sx=x*im.width/EXP_PAINT_W,sy=y*im.height/EXP_PAINT_H;uint8_t *q=im.rgba+((uint32_t)sy*(uint32_t)im.width+(uint32_t)sx)*4u;w->paint.pixels[y][x]=(uint8_t)paint_nearest_color(q[0],q[1],q[2]);}
+    w->paint.cursor_x=0;w->paint.cursor_y=0;w->paint.anchor_valid=0;ksnprintf(w->paint_status,sizeof(w->paint_status),"Imported %s as %ux%u palette canvas; U restores prior canvas.",path,EXP_PAINT_W,EXP_PAINT_H);atm_image_release(&im);return 0;
+}
 static void paint_save_ppm(exp_win_t*w){
     exp_paint_t*p=&w->paint;char path[96],header[48];uint8_t row[EXP_PAINT_W*3];int fd=-1,number=0;
     if(!catfs_vfs_is_mounted()){kstrcpy(w->paint_status,"Save needs mounted CatFS /data.");return;}(void)vfs_mkdir("/data/uiu",0755);(void)vfs_mkdir("/data/uiu/paint",0755);
@@ -1806,6 +1823,43 @@ static void draw_launcher(void){
     T(lx+lw-156,ly+lh-21,"Enter open  arrows browse",C_SUBTEXT,C_SURFACE0);
 }
 
+/* ─── Command palette, overview and desktop toggle ───────── */
+static int win_to_front(int idx);
+static int palette_match(const char *text,const char *query){
+    if(!query||!query[0])return 1;
+    for(int i=0;text&&text[i];i++){
+        int a=i,b=0;
+        while(text[a]&&query[b]){char x=text[a],y=query[b];if(x>='A'&&x<='Z')x+=32;if(y>='A'&&y<='Z')y+=32;if(x!=y)break;a++;b++;}
+        if(!query[b])return 1;
+    }
+    return 0;
+}
+static int palette_count(void){int n=0;for(int i=0;i<NLA;i++)if(palette_match(LA[i].name,DE.palette_query)||palette_match(LA[i].desc,DE.palette_query))n++;return n;}
+static int palette_app_at(int rank){for(int i=0;i<NLA;i++)if(palette_match(LA[i].name,DE.palette_query)||palette_match(LA[i].desc,DE.palette_query)){if(rank--==0)return i;}return -1;}
+static void palette_close(void){DE.palette_open=0;DE.palette_query[0]=0;DE.palette_len=0;DE.palette_sel=0;}
+static void palette_toggle(void){DE.palette_open=!DE.palette_open;DE.launcher_open=0;DE.overview_open=0;DE.palette_query[0]=0;DE.palette_len=0;DE.palette_sel=0;}
+static void palette_rect(int *x,int *y,int *w,int *h){*w=DE_SCR_W-44;if(*w>560)*w=560;if(*w<360)*w=360;*h=252;*x=(DE_SCR_W-*w)/2;*y=(DE_SCR_H-DE_TASKBAR_H-*h)/2;if(*y<8)*y=8;}
+static void draw_palette(void){
+    if(!DE.palette_open)return;int x,y,w,h;palette_rect(&x,&y,&w,&h);int count=palette_count();if(DE.palette_sel>=count)DE.palette_sel=count?count-1:0;
+    R(x+3,y+3,w,h,C_CRUST);RR(x,y,w,h,C_MANTLE);BOX(x,y,w,h,C_BLUE);R(x+10,y+12,w-20,30,C_SURFACE1);T(x+20,y+20,"Command palette",C_TEXT,C_SURFACE1);
+    char q[48];ksnprintf(q,sizeof(q),"> %s",DE.palette_query);T(x+166,y+20,q,C_LAVENDER,C_SURFACE1);T(x+w-108,y+20,"Alt+R  Esc",C_SUBTEXT,C_SURFACE1);
+    if(!count)T(x+18,y+62,"No native application matches this literal query.",C_YELLOW,C_MANTLE);
+    for(int row=0;row<count&&row<7;row++){int idx=palette_app_at(row),ry=y+52+row*24;if(idx<0)break;int sel=row==DE.palette_sel;color32_t bg=sel?C_SURFACE1:C_MANTLE,fg=sel?C_TEXT:C_SUBTEXT;R(x+12,ry,w-24,22,bg);if(sel)BOX(x+12,ry,w-24,22,C_BLUE);draw_app_icon(LA[idx].app,x+18,ry+3,16,LA[idx].ic,bg);T(x+42,ry+5,LA[idx].name,fg,bg);TC(x+176,ry+5,LA[idx].desc,C_SUBTEXT,bg,w-198);}
+    T(x+16,y+h-20,"Type to filter  Up/Down select  Enter open",C_SUBTEXT,C_MANTLE);
+}
+static void show_desktop_toggle(void){
+    if(!DE.show_desktop_active){for(int i=0;i<DE_MAX_WIN;i++)DE.show_desktop_ids[i]=-1;int n=0;for(int i=0;i<DE.win_count&&n<DE_MAX_WIN;i++)if(!DE.wins[i].minimized){DE.show_desktop_ids[n++]=DE.wins[i].id;DE.wins[i].minimized=1;}DE.show_desktop_active=1;DE.active=-1;exp_notify("Desktop shown; Ctrl+D restores session windows",C_SUBTEXT);}
+    else{int front=-1;for(int n=0;n<DE_MAX_WIN;n++)if(DE.show_desktop_ids[n]>=0)for(int i=0;i<DE.win_count;i++)if(DE.wins[i].id==DE.show_desktop_ids[n]){DE.wins[i].minimized=0;front=i;}if(front>=0)win_to_front(front);DE.show_desktop_active=0;exp_notify("Session windows restored",C_SUBTEXT);}
+}
+static void overview_toggle(void){DE.overview_open=!DE.overview_open;DE.palette_open=0;DE.launcher_open=0;DE.overview_sel=DE.active>=0?DE.active:0;}
+static void overview_rect(int *x,int *y,int *w,int *h){*w=DE_SCR_W-60;if(*w>500)*w=500;if(*w<320)*w=320;*h=DE.win_count*28+76;if(*h<116)*h=116;if(*h>300)*h=300;*x=(DE_SCR_W-*w)/2;*y=(DE_SCR_H-DE_TASKBAR_H-*h)/2;if(*y<8)*y=8;}
+static void draw_overview(void){
+    if(!DE.overview_open)return;int x,y,w,h;overview_rect(&x,&y,&w,&h);if(DE.overview_sel>=DE.win_count)DE.overview_sel=DE.win_count?DE.win_count-1:0;R(x+3,y+3,w,h,C_CRUST);RR(x,y,w,h,C_MANTLE);BOX(x,y,w,h,C_BLUE);T(x+16,y+14,"Open windows",C_TEXT,C_MANTLE);T(x+w-108,y+14,"Ctrl+W  Esc",C_SUBTEXT,C_MANTLE);
+    if(!DE.win_count)T(x+16,y+48,"No application window is open.",C_SUBTEXT,C_MANTLE);
+    for(int i=0;i<DE.win_count&&i<8;i++){int ry=y+40+i*28;exp_win_t *ww=&DE.wins[i];int sel=i==DE.overview_sel;color32_t bg=sel?C_SURFACE1:C_MANTLE,fg=sel?C_TEXT:C_SUBTEXT;R(x+12,ry,w-24,24,bg);if(sel)BOX(x+12,ry,w-24,24,C_BLUE);draw_app_icon(ww->app,x+18,ry+4,16,fg,bg);T(x+42,ry+7,ww->title,fg,bg);T(x+w-80,ry+7,ww->minimized?"minimized":"visible",C_SUBTEXT,bg);}
+    T(x+16,y+h-20,"Up/Down select  Enter bring forward",C_SUBTEXT,C_MANTLE);
+}
+
 /* ─── Alt+Tab ────────────────────────────────────────────── */
 static void draw_alttab(void){
     if(!DE.alttab_open||DE.win_count==0) return;
@@ -1949,7 +2003,7 @@ int exp_open_app(app_id_t app, const char *path){
         w->w=390; w->h=365; tetris_init(w); break;
     case APP_PAINT:
         kstrcpy(w->title,"Paint");
-        w->w=430; w->h=355; paint_init(w); break;
+        w->w=430; w->h=355; paint_init(w); if(path&&path[0]){kstrcpy(w->title,"Paint - PPM import");(void)paint_import_ppm(w,path);} break;
     case APP_ABOUT:
         kstrcpy(w->title,"About");
         w->w=440; w->h=340; break;
@@ -2015,7 +2069,8 @@ static void exp_mouse_press(int mx,int my){
     /* Taskbar launcher and task buttons. */
     int panel_y=DE_SCR_H-DE_TASKBAR_H;
     if(my>=panel_y){
-        if(mx<80){DE.launcher_open=!DE.launcher_open;DE.launcher_sel=0;return;}
+        if(mx<80){DE.launcher_open=!DE.launcher_open;DE.launcher_sel=0;DE.palette_open=0;DE.overview_open=0;return;}
+        if(mx>=DE_SCR_W-208&&mx<DE_SCR_W-182){show_desktop_toggle();return;}
         int wx=84;
         for(int i=0;i<DE.win_count;i++,wx+=110) if(inside(mx,my,wx,panel_y+4,104,DE_TASKBAR_H-8)){
             if(DE.wins[i].minimized){DE.wins[i].minimized=0;win_to_front(i);}
@@ -2024,6 +2079,16 @@ static void exp_mouse_press(int mx,int my){
             return;
         }
         return;
+    }
+    if(DE.palette_open){
+        int x,y,w,h;palette_rect(&x,&y,&w,&h);int count=palette_count();
+        for(int row=0;row<count&&row<7;row++)if(inside(mx,my,x+12,y+52+row*24,w-24,22)){int idx=palette_app_at(row);if(idx>=0){palette_close();exp_open_app(LA[idx].app,NULL);}return;}
+        if(!inside(mx,my,x,y,w,h))palette_close();return;
+    }
+    if(DE.overview_open){
+        int x,y,w,h;overview_rect(&x,&y,&w,&h);
+        for(int i=0;i<DE.win_count&&i<8;i++)if(inside(mx,my,x+12,y+40+i*28,w-24,24)){DE.overview_sel=i;DE.overview_open=0;DE.wins[i].minimized=0;win_to_front(i);return;}
+        if(!inside(mx,my,x,y,w,h))DE.overview_open=0;return;
     }
     /* XP-style Start menu cells. */
     if(DE.launcher_open){
@@ -2156,6 +2221,8 @@ static void full_redraw(void){
     }
     if(DE.alttab_open) draw_alttab();
     if(DE.launcher_open) draw_launcher();
+    if(DE.overview_open) draw_overview();
+    if(DE.palette_open) draw_palette();
     draw_notifs();
     draw_taskbar();
     draw_mouse_cursor();
@@ -2233,6 +2300,10 @@ void exp_run(void){
         /* Exit */
         if(ctrl2&&alt2&&(k=='\b'||k==8)){DE.running=0;break;}
         if(alt2&&k==KEY_F1){DE.running=0;break;}
+        /* Desktop-wide productivity overlays. */
+        if(alt2&&(k=='r'||k=='R')){palette_toggle();full_redraw();continue;}
+        if(ctrl2&&(k=='d'||k=='D')){show_desktop_toggle();full_redraw();continue;}
+        if(ctrl2&&(k=='w'||k=='W')){overview_toggle();full_redraw();continue;}
         /* F2 launcher */
         if(k==KEY_F2){
             DE.launcher_open=!DE.launcher_open;
@@ -2275,6 +2346,24 @@ void exp_run(void){
                 if(k==KEY_UP){aw->y-=16;if(aw->y<0)aw->y=0;full_redraw();continue;}
                 if(k==KEY_DOWN){aw->y+=16;if(aw->y+aw->h>DE_SCR_H-DE_TASKBAR_H)aw->y=DE_SCR_H-DE_TASKBAR_H-aw->h;full_redraw();continue;}
             }
+        }
+        /* Command palette input: literal 31-byte filter, no shell execution. */
+        if(DE.palette_open){
+            int count=palette_count();if(DE.palette_sel>=count)DE.palette_sel=count?count-1:0;
+            if(k==KEY_ESC){palette_close();full_redraw();continue;}
+            if(k==KEY_UP&&DE.palette_sel>0){DE.palette_sel--;full_redraw();continue;}
+            if(k==KEY_DOWN&&DE.palette_sel+1<count){DE.palette_sel++;full_redraw();continue;}
+            if(k=='\n'||k=='\r'){int idx=palette_app_at(DE.palette_sel);if(idx>=0){palette_close();exp_open_app(LA[idx].app,NULL);}full_redraw();continue;}
+            if(k==KEY_BACKSPACE){if(DE.palette_len>0)DE.palette_query[--DE.palette_len]=0;DE.palette_sel=0;full_redraw();continue;}
+            if(k>=0x20&&k<0x7f&&DE.palette_len<(int)sizeof(DE.palette_query)-1){DE.palette_query[DE.palette_len++]=(char)k;DE.palette_query[DE.palette_len]=0;DE.palette_sel=0;full_redraw();continue;}
+            continue;
+        }
+        if(DE.overview_open){
+            if(k==KEY_ESC){DE.overview_open=0;full_redraw();continue;}
+            if(k==KEY_UP&&DE.overview_sel>0){DE.overview_sel--;full_redraw();continue;}
+            if(k==KEY_DOWN&&DE.overview_sel+1<DE.win_count){DE.overview_sel++;full_redraw();continue;}
+            if((k=='\n'||k=='\r')&&DE.overview_sel>=0&&DE.overview_sel<DE.win_count){int target=DE.overview_sel;DE.overview_open=0;DE.wins[target].minimized=0;win_to_front(target);full_redraw();continue;}
+            continue;
         }
         /* Launcher input */
         if(DE.launcher_open){

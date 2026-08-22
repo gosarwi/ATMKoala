@@ -134,6 +134,14 @@ grep -Fq '[exp] utf8-layout-ok' "$SERIAL" || {
   echo 'Exp UTF-8 layout regression did not report serial [exp] utf8-layout-ok' >&2
   exit 1
 }
+grep -Fq '[atmbox] primitives-ok' "$SERIAL" || {
+  echo 'atm-box CRC32/strings primitive regression did not report serial [atmbox] primitives-ok' >&2
+  exit 1
+}
+grep -Fq '[cfdisk] staged-ok' "$SERIAL" || {
+  echo 'Staged cfdisk transition regression did not report serial [cfdisk] staged-ok' >&2
+  exit 1
+}
 grep -Fq '[time] timezone-ok' "$SERIAL" || {
   echo 'Timezone conversion regression did not report serial [time] timezone-ok' >&2
   exit 1

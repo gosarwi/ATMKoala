@@ -301,6 +301,14 @@ typedef struct {
     int        launcher_sel;
     int        alttab_open;
     int        alttab_sel;
+    /* Desktop overlays remain local to one Exp session: Alt+R filters the
+     * existing native launcher catalogue, Ctrl+W lists current windows, and
+     * Ctrl+D/taskbar toggles only windows that this action minimized. */
+    int        palette_open, palette_sel, palette_len;
+    char       palette_query[32];
+    int        overview_open, overview_sel;
+    int        show_desktop_active;
+    int        show_desktop_ids[DE_MAX_WIN];
     exp_notif_t notifs[DE_NOTIF_MAX];
     uint32_t   clock_sec;
     uint32_t   last_clock;

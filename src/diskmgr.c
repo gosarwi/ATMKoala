@@ -13,6 +13,7 @@
 #include "keyboard.h"
 #include "pit.h"
 #include "util.h"
+#include "ossdk.h"
 #include <stdint.h>
 #include <stddef.h>
 
@@ -126,6 +127,11 @@ static int tui_confirm(int row, const char *msg) {
     int k = keyboard_getkey();
     return (k == 'y' || k == 'Y');
 }
+static int tui_confirm_word(int row,const char *msg,const char *word){
+    char in[16];int len=0;in[0]=0;tui_setcol(C_WARN_FG,C_NORMAL_BG);tui_goto(row,2);tui_write(msg);tui_write(" Type ");tui_write(word);tui_write(": ");
+    while(1){int k=keyboard_getkey();if(k=='\n'||k=='\r')break;if(k==KEY_ESC)return 0;if((k=='\b'||k==127)&&len>0){in[--len]=0;continue;}if(((k>='a'&&k<='z')||(k>='A'&&k<='Z'))&&len<(int)sizeof(in)-1){if(k>='a'&&k<='z')k-=32;in[len++]=(char)k;in[len]=0;}}
+    return !kstrcmp(in,word);
+}
 
 static void tui_readline(int row, int col, int width, char *out, int maxlen) {
     int len = 0, pos = 0;
@@ -164,16 +170,20 @@ typedef enum {
 static int      g_drive = -1;
 static mbr_table_t g_mbr;
 static int      g_mbr_loaded = 0;
+static int      g_dirty = 0; /* staged changes only; disk is touched by WRITE confirmation. */
 
 static void ensure_mbr_loaded(void) {
     if (g_drive < 0) return;
     if (mbr_read(g_drive, &g_mbr) < 0) {
-        /* No valid MBR yet on this disk — start from an empty table.
-         * Nothing is written until the user explicitly saves. */
+        /* No valid MBR yet on this disk — stage an empty table only.
+         * Nothing is written until explicit WRITE confirmation. */
         mbr_init_empty(&g_mbr);
     }
-    g_mbr_loaded = 1;
+    g_mbr_loaded = 1; g_dirty = 0;
 }
+static uint8_t dm_type_from_key(int k){if(k=='1')return PART_TYPE_CATFS;if(k=='2')return PART_TYPE_LINUX;if(k=='3')return PART_TYPE_LINUX_SWAP;if(k=='4')return PART_TYPE_FAT32;return PART_TYPE_EMPTY;}
+static void dm_set_bootable(mbr_table_t *t,int idx){if(!t||idx<0||idx>=PART_MAX_ENTRIES||t->entries[idx].type==PART_TYPE_EMPTY)return;for(int i=0;i<PART_MAX_ENTRIES;i++)t->entries[i].status=0;t->entries[idx].status=0x80;}
+int diskmgr_selftest(void){mbr_table_t t;mbr_init_empty(&t);if(mbr_add_partition(&t,PART_TYPE_CATFS,2048,4096,0)!=0)return -1;if(mbr_add_partition(&t,PART_TYPE_LINUX,8192,4096,0)!=1)return -1;dm_set_bootable(&t,1);if(t.entries[0].status||t.entries[1].status!=0x80||mbr_validate(&t)<0)return -1;t.entries[0].type=PART_TYPE_LINUX_SWAP;return t.entries[0].type==PART_TYPE_LINUX_SWAP&&mbr_validate(&t)==0?0:-1;}
 
 /* ── SCREEN: select drive ────────────────────────────────────── */
 static dm_screen_t screen_select_drive(void) {
@@ -220,6 +230,7 @@ static dm_screen_t screen_select_drive(void) {
         if (k == '\n' || k == '\r') {
             g_drive = present_idx[sel];
             ensure_mbr_loaded();
+            sdk_serial_write("[cfdisk] ready\n");
             return SCREEN_PARTITIONS;
         }
     }
@@ -235,8 +246,8 @@ static dm_screen_t screen_partitions(void) {
         tui_clear_content();
 
         tui_write_centered(TUI_CONTENT_TOP + 1,
-            "MBR Partition Table  (N=new  D=delete  F=format CatFS  W=write to disk)",
-            C_LABEL_FG, C_NORMAL_BG);
+            g_dirty ? "STAGED MBR — N add D delete T type B boot R reload W WRITE" : "MBR table — N add D delete T type B boot R reload W write",
+            g_dirty ? C_WARN_FG : C_LABEL_FG, C_NORMAL_BG);
 
         tui_setcol(VGA_CYAN, C_NORMAL_BG);
         tui_goto(TUI_CONTENT_TOP + 3, 2);
@@ -280,53 +291,21 @@ static dm_screen_t screen_partitions(void) {
         tui_setcol(C_LABEL_FG, C_NORMAL_BG);
         tui_goto(TUI_CONTENT_TOP + 10, 2);
         tui_write(sumline);
+        tui_setcol(g_dirty ? C_WARN_FG : C_HINT_FG, C_NORMAL_BG);
+        tui_goto(TUI_CONTENT_TOP + 12, 2);
+        tui_write(g_dirty ? "STAGED ONLY: disk changes only after W then WRITE." : "Clean table loaded from sector 0; edits are staged in memory.");
 
         int k = keyboard_getkey();
         if (k == KEY_UP)   { if (sel > 0) sel--; continue; }
         if (k == KEY_DOWN) { if (sel < PART_MAX_ENTRIES-1) sel++; continue; }
-        if (k == 'q' || k == 'Q' || k == KEY_ESC) return SCREEN_SELECT_DRIVE;
-
+        if (k == 'q' || k == 'Q' || k == KEY_ESC) { if(!g_dirty || tui_confirm_word(TUI_HINT_ROW-1,"Discard all staged changes?","DISCARD")) return SCREEN_SELECT_DRIVE; continue; }
         if (k == 'n' || k == 'N') return SCREEN_ADD;
-
-        if ((k == 'd' || k == 'D') &&
-            g_mbr.entries[sel].type != PART_TYPE_EMPTY) {
-            if (tui_confirm(TUI_HINT_ROW - 1,
-                "Delete this partition entry? (data is not erased, only the table entry)")) {
-                mbr_remove_partition(&g_mbr, sel);
-            }
-            continue;
-        }
-
-        if ((k == 'f' || k == 'F') &&
-            g_mbr.entries[sel].type == PART_TYPE_CATFS) {
-            if (tui_confirm(TUI_HINT_ROW - 1,
-                "Format this partition with CatFS? ALL DATA ON IT WILL BE LOST")) {
-                tui_clear_content();
-                tui_write_centered(TUI_CONTENT_TOP + 5,
-                    "Formatting...", C_WARN_FG, C_NORMAL_BG);
-                int r = catfs_format_at(g_drive, g_mbr.entries[sel].lba_start, "catfs");
-                tui_setcol(r == 0 ? C_OK_FG : C_ERR_FG, C_NORMAL_BG);
-                tui_goto(TUI_CONTENT_TOP + 7, 2);
-                tui_write(r == 0 ? "Format complete." : "Format failed.");
-                tui_setcol(C_HINT_FG, C_NORMAL_BG);
-                tui_goto(TUI_CONTENT_TOP + 9, 2);
-                tui_write("Press any key...");
-                keyboard_getkey();
-            }
-            continue;
-        }
-
-        if (k == 'w' || k == 'W') {
-            if (tui_confirm(TUI_HINT_ROW - 1,
-                "Write this partition table to disk now?")) {
-                int r = mbr_write(g_drive, &g_mbr, 0);
-                tui_setcol(r == 0 ? C_OK_FG : C_ERR_FG, C_NORMAL_BG);
-                tui_goto(TUI_HINT_ROW - 1, 2);
-                tui_write(r == 0 ? "Partition table written.        " : "Write FAILED.                   ");
-                pit_sleep(100);
-            }
-            continue;
-        }
+        if ((k == 'd' || k == 'D') && g_mbr.entries[sel].type != PART_TYPE_EMPTY) { if(tui_confirm(TUI_HINT_ROW-1,"Stage removal of selected entry? Data sectors are not erased")){mbr_remove_partition(&g_mbr,sel);g_dirty=1;} continue; }
+        if ((k == 't' || k == 'T') && g_mbr.entries[sel].type != PART_TYPE_EMPTY) { tui_setcol(C_LABEL_FG,C_NORMAL_BG);tui_goto(TUI_HINT_ROW-1,2);tui_write("Type: 1=CatFS  2=Linux  3=swap  4=FAT32  Esc cancel");uint8_t type=dm_type_from_key(keyboard_getkey());if(type){g_mbr.entries[sel].type=type;g_dirty=1;}continue; }
+        if ((k == 'b' || k == 'B') && g_mbr.entries[sel].type != PART_TYPE_EMPTY) { dm_set_bootable(&g_mbr,sel);g_dirty=1;continue; }
+        if (k == 'r' || k == 'R') { if(!g_dirty || tui_confirm_word(TUI_HINT_ROW-1,"Discard staged table and re-read sector 0?","DISCARD"))ensure_mbr_loaded();continue; }
+        if ((k == 'f' || k == 'F') && g_mbr.entries[sel].type == PART_TYPE_CATFS) { if(g_dirty){tui_setcol(C_WARN_FG,C_NORMAL_BG);tui_goto(TUI_HINT_ROW-1,2);tui_write("Write or reload staged table before formatting CatFS.");keyboard_getkey();continue;}if(tui_confirm_word(TUI_HINT_ROW-1,"Format selected CatFS partition? ALL DATA LOST.","FORMAT")){tui_clear_content();tui_write_centered(TUI_CONTENT_TOP+5,"Formatting...",C_WARN_FG,C_NORMAL_BG);int r=catfs_format_at(g_drive,g_mbr.entries[sel].lba_start,"catfs");tui_setcol(r==0?C_OK_FG:C_ERR_FG,C_NORMAL_BG);tui_goto(TUI_CONTENT_TOP+7,2);tui_write(r==0?"Format complete.":"Format failed.");tui_goto(TUI_CONTENT_TOP+9,2);tui_write("Press any key...");keyboard_getkey();}continue; }
+        if (k == 'w' || k == 'W') { if(!g_dirty){tui_setcol(C_HINT_FG,C_NORMAL_BG);tui_goto(TUI_HINT_ROW-1,2);tui_write("No staged MBR change to write.");pit_sleep(80);continue;}if(mbr_validate_drive(g_drive,&g_mbr)<0){tui_setcol(C_ERR_FG,C_NORMAL_BG);tui_goto(TUI_HINT_ROW-1,2);tui_write("Refused: staged MBR failed overlap/range validation.");keyboard_getkey();continue;}if(tui_confirm_word(TUI_HINT_ROW-1,"This changes only MBR sector 0.","WRITE")){sdk_serial_write("[cfdisk] write-accepted\n");int r=mbr_write(g_drive,&g_mbr,0);mbr_table_t verify;if(r==0&&mbr_read(g_drive,&verify)==0&&kmemcmp(verify.entries,g_mbr.entries,sizeof(g_mbr.entries))==0){g_dirty=0;sdk_serial_write("[cfdisk] write-ok\n");tui_setcol(C_OK_FG,C_NORMAL_BG);tui_goto(TUI_HINT_ROW-1,2);tui_write("MBR written and re-read successfully.");}else{tui_setcol(C_ERR_FG,C_NORMAL_BG);tui_goto(TUI_HINT_ROW-1,2);tui_write("WRITE failed or verify mismatch; staged table retained.");}keyboard_getkey();}continue; }
     }
 }
 
@@ -395,8 +374,9 @@ static dm_screen_t screen_add(void) {
         int idx = mbr_add_partition(&g_mbr, PART_TYPE_CATFS, start, sectors, bootable);
         tui_setcol(idx >= 0 ? C_OK_FG : C_ERR_FG, C_NORMAL_BG);
         tui_goto(row, 4);
-        tui_write(idx >= 0 ? "Partition added (not yet written to disk — press W on the previous screen)."
+        tui_write(idx >= 0 ? "Partition staged — press W then type WRITE to commit only the MBR."
                             : "No free partition slot.");
+        if(idx>=0) { g_dirty=1; sdk_serial_write("[cfdisk] staged-add\n"); }
     }
 
     row += 2;
@@ -411,6 +391,7 @@ void diskmgr_run(void) {
     dm_screen_t screen = SCREEN_SELECT_DRIVE;
     g_drive = -1;
     g_mbr_loaded = 0;
+    g_dirty = 0;
 
     while (screen != SCREEN_QUIT) {
         switch (screen) {

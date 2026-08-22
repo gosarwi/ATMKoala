@@ -9,5 +9,7 @@
  * Run from the shell as: diskmgr
  */
 void diskmgr_run(void);
+/* Pure staged-MBR transition checks; no drive read/write or formatting. */
+int diskmgr_selftest(void);
 
 #endif

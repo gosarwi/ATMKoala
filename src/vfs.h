@@ -101,6 +101,7 @@
 /* ── Error codes ─────────────────────────────────────────── */
 #define ENOENT      2
 #define EACCES      13
+#define EBUSY       16
 #define EEXIST      17
 #define ENOTDIR     20
 #define EISDIR      21
@@ -250,6 +251,9 @@ vfs_inode_t *vfs_root(void);
 /* Mount */
 int          vfs_mount(const char *path, vfs_inode_t *root);
 int          vfs_unmount(const char *path);
+/* Nonzero when an open VFS descriptor still references this filesystem ops
+ * table; mounted adapters use it to refuse unsafe detach. */
+int          vfs_fsops_busy(const vfs_fsops_t *ops);
 
 /* Path resolution */
 vfs_inode_t *vfs_lookup(const char *path);

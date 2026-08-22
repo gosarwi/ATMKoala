@@ -12,6 +12,10 @@
 
 #define ATMBOX_LIST_MAX 256u
 #define ATMBOX_DUMP_MAX 4096u
+#define ATMBOX_STRINGS_SCAN_MAX 65536u
+#define ATMBOX_STRINGS_OUT_MAX 128u
+#define ATMBOX_CRC32_SCAN_MAX (16u*1024u*1024u)
+#define ATMBOX_SEQ_MAX 512
 
 static void outc(char c) {
     if (vbe.active) vbe_console_putchar(c); else terminal_putchar(c);
@@ -41,8 +45,8 @@ static void out_hex64(uint64_t value) {
 
 void atmbox_print_applets(void) {
     outln("atm-box native Toybox-compatible applets:");
-    outln("  basename cat cmp cp dirname echo false free gpuinfo grep head hexdump id");
-    outln("  iostat kill ls mkdir mv ps rm stat tail touch true uname uptime wc");
+    outln("  basename cat cmp cp crc32 dirname echo false free gpuinfo grep head hexdump id");
+    outln("  iostat kill ls mkdir mv ps rm seq stat strings tail touch true uname uptime wc");
     outln("  Usage: atm-box <applet> [arguments]");
 }
 
@@ -187,6 +191,24 @@ static int app_hexdump(int argc,char *argv[]){
     }
     vfs_close(fd);if(n<0){err("hexdump","read failed");return -1;}if(total==ATMBOX_DUMP_MAX)outln("atm-box hexdump: output capped at 4096 bytes");return 0;
 }
+static uint32_t crc32_update(uint32_t crc,const uint8_t *buf,uint32_t n){for(uint32_t i=0;i<n;i++){crc^=buf[i];for(int bit=0;bit<8;bit++)crc=(crc>>1)^((crc&1u)?0xEDB88320u:0u);}return crc;}
+static int app_crc32(int argc,char *argv[]){
+    if(argc!=3){err("crc32","usage: atm-box crc32 <file> (scan capped at 16 MiB)");return -1;}
+    int fd=vfs_open(argv[2],O_RDONLY,0);if(fd<0){err("crc32","not found");return -1;}uint8_t buf[512];uint32_t crc=0xffffffffu,scanned=0;int64_t n;
+    while(scanned<ATMBOX_CRC32_SCAN_MAX&&(n=vfs_read(fd,buf,sizeof(buf)))>0){uint32_t take=(uint32_t)n;if(take>ATMBOX_CRC32_SCAN_MAX-scanned)take=ATMBOX_CRC32_SCAN_MAX-scanned;crc=crc32_update(crc,buf,take);scanned+=take;if(take<(uint32_t)n)break;}
+    vfs_close(fd);if(n<0){err("crc32","read failed");return -1;}crc^=0xffffffffu;out("crc32=");out_hex64((uint64_t)crc);out(" bytes=");outu(scanned);if(scanned==ATMBOX_CRC32_SCAN_MAX)out(" capped");outc('\n');return 0;
+}
+static int string_printable(uint8_t c){return c>=0x20u&&c<=0x7eu;}
+static int app_strings(int argc,char *argv[]){
+    int arg=2,min=4;if(argc>=5&&!kstrcmp(argv[2],"-n")){min=kstrtoi(argv[3]);arg=4;}if(arg!=argc-1||min<3||min>32){err("strings","usage: atm-box strings [-n 3..32] <file>");return -1;}
+    int fd=vfs_open(argv[arg],O_RDONLY,0);if(fd<0){err("strings","not found");return -1;}char run[65];uint32_t used=0,scanned=0,shown=0;uint8_t buf[256];int64_t n;
+    while(scanned<ATMBOX_STRINGS_SCAN_MAX&&(n=vfs_read(fd,buf,sizeof(buf)))>0){for(int64_t i=0;i<n&&scanned<ATMBOX_STRINGS_SCAN_MAX;i++,scanned++){uint8_t c=buf[i];if(string_printable(c)){if(used<(uint32_t)sizeof(run)-1)run[used++]=(char)c;}else{if(used>=(uint32_t)min){run[used]=0;outln(run);if(++shown>=ATMBOX_STRINGS_OUT_MAX){outln("atm-box strings: output capped at 128");vfs_close(fd);return 0;}}used=0;}}}
+    if(used>=(uint32_t)min&&shown<ATMBOX_STRINGS_OUT_MAX){run[used]=0;outln(run);}vfs_close(fd);if(n<0){err("strings","read failed");return -1;}if(scanned==ATMBOX_STRINGS_SCAN_MAX)outln("atm-box strings: scan capped at 65536 bytes");return 0;
+}
+static int app_seq(int argc,char *argv[]){
+    int first=1,step=1,last=0;if(argc==3)last=kstrtoi(argv[2]);else if(argc==4){first=kstrtoi(argv[2]);last=kstrtoi(argv[3]);}else if(argc==5){first=kstrtoi(argv[2]);step=kstrtoi(argv[3]);last=kstrtoi(argv[4]);}else{err("seq","usage: atm-box seq [first [step]] last");return -1;}if(!step){err("seq","step must be non-zero");return -1;}if((step>0&&first>last)||(step<0&&first<last))return 0;for(int n=0;n<ATMBOX_SEQ_MAX;n++){if((step>0&&first>last)||(step<0&&first<last))return 0;char b[24];kitoa(first,b,10);outln(b);if((step>0&&first>2147483647-step)||(step<0&&first<-2147483647-step)){err("seq","integer range reached");return -1;}first+=step;}outln("atm-box seq: output capped at 512");return 0;
+}
+int atmbox_selftest(void){static const uint8_t sample[]={'1','2','3','4','5','6','7','8','9'};uint32_t c=crc32_update(0xffffffffu,sample,sizeof(sample))^0xffffffffu;return c==0xCBF43926u&&string_printable('A')&&!string_printable('\n')?0:-1;}
 static int app_id(void){out("uid=");outu(vfs_current_uid());out(" gid=");outu(vfs_current_gid());outc('\n');return 0;}
 static const char *task_state_name(task_state_t state){
     switch(state){case TASK_READY:return "ready";case TASK_RUNNING:return "running";case TASK_BLOCKED:return "blocked";case TASK_ZOMBIE:return "zombie";default:return "unused";}
@@ -244,6 +266,9 @@ int atmbox_dispatch(int argc, char *argv[]) {
     if (!kstrcmp(app,"ls")) return app_ls(argc,argv);
     if (!kstrcmp(app,"stat")) return app_stat(argc,argv);
     if (!kstrcmp(app,"cmp")) return app_cmp(argc,argv);
+    if (!kstrcmp(app,"crc32")) return app_crc32(argc,argv);
+    if (!kstrcmp(app,"strings")) return app_strings(argc,argv);
+    if (!kstrcmp(app,"seq")) return app_seq(argc,argv);
     if (!kstrcmp(app,"hexdump")) return app_hexdump(argc,argv);
     if (!kstrcmp(app,"id")) return app_id();
     if (!kstrcmp(app,"ps")) return app_ps();
