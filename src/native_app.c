@@ -1,4 +1,5 @@
 #include "native_app.h"
+#include "atminit.h"
 #include "elf.h"
 #include "usermode.h"
 #include "sched.h"
@@ -40,31 +41,46 @@ static int native_write_bytes(user_space_t *space,uint64_t va,const void *src,ui
     return 0;
 }
 
-/* One bounded static-process startup record, held entirely in the mapped top
- * stack page. It follows the x86-64 process-stack shape: argc, a NULL
+/* The initial record follows the x86-64 process-stack shape: argc, a NULL
  * terminated argv vector, a NULL terminated envp vector, then auxv pairs.
- * The current native launcher exposes argv[0] only and an empty environment;
- * a later execve path will own caller-provided argv/envp marshalling. */
-static int native_init_start_stack(user_space_t *space,const char *name,
-                                   const elf64_user_image_t *loaded,uint64_t *stack_out){
+ * `payload` is kernel-owned and bounded before any old image is replaced. */
+static int native_exec_payload_valid(const native_exec_payload_t *payload){
+    if(!payload||!payload->argc||payload->argc>ATM_NATIVE_EXEC_MAX_ARGS||payload->envc>ATM_NATIVE_EXEC_MAX_ENV||!payload->bytes||payload->bytes>ATM_NATIVE_EXEC_STR_BYTES)return -1;
+    for(uint32_t list=0;list<2;list++){
+        uint32_t count=list?payload->envc:payload->argc;
+        const uint16_t *offsets=list?payload->env_off:payload->argv_off;
+        for(uint32_t i=0;i<count;i++){
+            uint32_t off=offsets[i],end=off;
+            if(off>=payload->bytes)return -1;
+            while(end<payload->bytes&&payload->strings[end])end++;
+            if(end==payload->bytes)return -1;
+        }
+    }
+    return 0;
+}
+static int native_exec_payload_default(native_exec_payload_t *payload,const char *name){
     const char *program=(name&&name[0])?name:"native";
-    uint64_t name_len=(uint64_t)kstrlen(program)+1;
-    const uint64_t words=10; /* argc, argv[0..1], envp[0], three auxv pairs */
-    if(!space||!loaded||!stack_out||name_len>ATM_PAGE_SIZE-words*8) return -1;
-    uint64_t name_va=loaded->stack_top-name_len;
-    uint64_t stack=(name_va-words*8)&~0xfULL;
-    if(stack<ATM_USER_STACK_TOP || stack+words*8>name_va) return -1;
-    if(native_write_bytes(space,name_va,program,name_len)<0 ||
-       native_write_word(space,stack+0,1)<0 ||
-       native_write_word(space,stack+8,name_va)<0 ||
-       native_write_word(space,stack+16,0)<0 ||
-       native_write_word(space,stack+24,0)<0 ||
-       native_write_word(space,stack+32,ATM_AT_PAGESZ)<0 ||
-       native_write_word(space,stack+40,ATM_PAGE_SIZE)<0 ||
-       native_write_word(space,stack+48,ATM_AT_ENTRY)<0 ||
-       native_write_word(space,stack+56,loaded->entry)<0 ||
-       native_write_word(space,stack+64,ATM_AT_NULL)<0 ||
-       native_write_word(space,stack+72,0)<0) return -1;
+    uint32_t bytes=(uint32_t)kstrlen(program)+1;
+    if(!payload||bytes>ATM_NATIVE_EXEC_STR_BYTES)return -1;
+    kmemset(payload,0,sizeof(*payload));payload->argc=1;payload->bytes=bytes;payload->argv_off[0]=0;kmemcpy(payload->strings,program,bytes);
+    return 0;
+}
+static int native_init_start_stack(user_space_t *space,const native_exec_payload_t *payload,
+                                   const elf64_user_image_t *loaded,uint64_t *stack_out){
+    uint64_t words,string_va,stack,at=0;
+    if(!space||!loaded||!stack_out||native_exec_payload_valid(payload)<0)return -1;
+    words=1u+(uint64_t)payload->argc+1u+(uint64_t)payload->envc+1u+6u;
+    if(payload->bytes+words*8u>ATM_PAGE_SIZE)return -1;
+    string_va=loaded->stack_top-payload->bytes;
+    stack=(string_va-words*8u)&~0xfULL;
+    if(stack<ATM_USER_STACK_TOP||stack+words*8u>string_va)return -1;
+    if(native_write_bytes(space,string_va,payload->strings,payload->bytes)<0||native_write_word(space,stack+at*8u,payload->argc)<0)return -1;
+    at++;
+    for(uint32_t i=0;i<payload->argc;i++,at++)if(native_write_word(space,stack+at*8u,string_va+payload->argv_off[i])<0)return -1;
+    if(native_write_word(space,stack+at*8u,0)<0)return -1;at++;
+    for(uint32_t i=0;i<payload->envc;i++,at++)if(native_write_word(space,stack+at*8u,string_va+payload->env_off[i])<0)return -1;
+    if(native_write_word(space,stack+at*8u,0)<0)return -1;at++;
+    if(native_write_word(space,stack+at*8u,ATM_AT_PAGESZ)<0||native_write_word(space,stack+(at+1u)*8u,ATM_PAGE_SIZE)<0||native_write_word(space,stack+(at+2u)*8u,ATM_AT_ENTRY)<0||native_write_word(space,stack+(at+3u)*8u,loaded->entry)<0||native_write_word(space,stack+(at+4u)*8u,ATM_AT_NULL)<0||native_write_word(space,stack+(at+5u)*8u,0)<0)return -1;
     *stack_out=stack;
     return 0;
 }
@@ -109,8 +125,9 @@ static int native_app_spawn_memory_common(const char *name,const uint8_t *image,
         sdk_serial_write("[native] spawn-elf-load-fail: ");sdk_serial_write(loaded.error);sdk_serial_write("\n");
         paging_destroy_user_space(space); kfree(space); return -1;
     }
+    native_exec_payload_t initial;
     uint64_t stack=0;
-    if(native_init_start_stack(space,name,&loaded,&stack)<0){
+    if(native_exec_payload_default(&initial,name)<0||native_init_start_stack(space,&initial,&loaded,&stack)<0){
         sdk_serial_write("[native] spawn-stack-init-fail\n");paging_destroy_user_space(space); kfree(space); return -1;
     }
     uint64_t initial_brk=(loaded.load_end+ATM_PAGE_SIZE-1)&ATM_PAGE_MASK;
@@ -138,6 +155,7 @@ static int native_app_spawn_memory_common(const char *name,const uint8_t *image,
     task->resident_bytes=(uint64_t)task->stack_size+paging_user_mapped_bytes(space);
     int pid=(int)task->pid;
     native_irq_restore(irq_flags);
+    atminit_note_app_launch(name&&name[0]?name:"native","CPL3 task created");
     return pid;
 }
 
@@ -167,19 +185,20 @@ int native_app_spawn_path(const char *path,const char *name,uint32_t priority){
     return ret;
 }
 
-/* This is deliberately narrower than POSIX execve: the syscall layer gives us
- * a checked path and at most one copied argv[0], while the native image must be
+/* Bounded native execve accepts copied argv/envp data but still requires a
  * static x86-64 ET_EXEC. No fork, dynamic linker, signals, or multithreaded
  * process model is claimed. Failure leaves task, frame, descriptors and the
  * old address space untouched. */
-int native_app_exec_current(task_t *task,registers_t *frame,const char *path,const char *name){
+int native_app_exec_current(task_t *task,registers_t *frame,const char *path,const native_exec_payload_t *payload){
+    const char *name;
     atm_posix_stat_t st;
     uint8_t *image=NULL;
     user_space_t *next=NULL,*old;
     elf64_user_image_t loaded;
     uint64_t stack=0,initial_brk=0;
     int fd=-1,rc=-1;
-    if(!task||!frame||!path||!path[0]||!task->address_space||!task->fd_table_ready) return -1;
+    if(!task||!frame||!path||!path[0]||!task->address_space||!task->fd_table_ready||native_exec_payload_valid(payload)<0) return -1;
+    name=payload->strings+payload->argv_off[0];
     if(atm_posix_stat(path,&st)<0||!st.st_size||st.st_size>ATM_NATIVE_MAX_IMAGE) return -1;
     image=(uint8_t *)kmalloc((size_t)st.st_size);
     next=(user_space_t *)kmalloc(sizeof(*next));
@@ -188,7 +207,7 @@ int native_app_exec_current(task_t *task,registers_t *frame,const char *path,con
     if(fd<0||atm_posix_read(fd,image,st.st_size)!=(int64_t)st.st_size) goto done;
     (void)atm_posix_close(fd);fd=-1;
     if(paging_create_user_space(next)<0||elf64_load_user(image,(uint32_t)st.st_size,next,&loaded)<0||
-       native_init_start_stack(next,name?name:path,&loaded,&stack)<0) goto done;
+       native_init_start_stack(next,payload,&loaded,&stack)<0) goto done;
     initial_brk=(loaded.load_end+ATM_PAGE_SIZE-1)&ATM_PAGE_MASK;
     if(initial_brk>=ATM_USER_STACK_TOP) goto done;
 
@@ -289,6 +308,174 @@ int native_app_linux_abi_selftest(void){
     int status=0,got=task_waitpid(pid,&status,0);
     if(got==pid&&TASK_WIFEXITED(status)&&TASK_WEXITSTATUS(status)==42){sdk_serial_write("[linux] l0-ok\\n");return 0;}
     sdk_serial_write("[linux] l0-fail\\n");return -1;
+}
+
+/* Linux x86-64 v13 descriptor regression: real SYSCALL executes pipe2 with
+ * Linux flag values, then dup3 with Linux O_CLOEXEC. This proves adapter flag
+ * translation rather than merely the native int 0x80 descriptor path. */
+int native_app_linux_descriptor_selftest(void){
+    uint8_t image[0x1000];kmemset(image,0,sizeof(image));
+    Elf64_Ehdr *h=(Elf64_Ehdr *)image;
+    h->e_ident[EI_MAG0]=ELF_MAGIC0;h->e_ident[EI_MAG1]=ELF_MAGIC1;h->e_ident[EI_MAG2]=ELF_MAGIC2;h->e_ident[EI_MAG3]=ELF_MAGIC3;
+    h->e_ident[EI_CLASS]=2;h->e_ident[EI_DATA]=1;h->e_ident[EI_VERSION]=1;h->e_type=ET_EXEC;h->e_machine=EM_X86_64;h->e_version=1;
+    h->e_entry=ATM_USER_BASE+0x200;h->e_phoff=sizeof(Elf64_Ehdr);h->e_ehsize=sizeof(Elf64_Ehdr);h->e_phentsize=sizeof(Elf64_Phdr);h->e_phnum=1;
+    Elf64_Phdr *p=(Elf64_Phdr *)(image+h->e_phoff);p->p_type=PT_LOAD;p->p_flags=PF_R|PF_W|PF_X;p->p_offset=0;p->p_vaddr=ATM_USER_BASE;p->p_filesz=0x400;p->p_memsz=0x400;p->p_align=ATM_PAGE_SIZE;
+    uint8_t *c=image+0x200;uint32_t n=0,patch[2],pc=0;
+#define LDB(x) do{c[n++]=(uint8_t)(x);}while(0)
+#define LDQ(v) do{uint32_t _v=(uint32_t)(v);LDB(_v);LDB(_v>>8);LDB(_v>>16);LDB(_v>>24);}while(0)
+#define LRAX(v) do{LDB(0x48);LDB(0xC7);LDB(0xC0);LDQ(v);}while(0)
+#define LRDI(v) do{LDB(0x48);LDB(0xC7);LDB(0xC7);LDQ(v);}while(0)
+#define LRSI(v) do{LDB(0x48);LDB(0xC7);LDB(0xC6);LDQ(v);}while(0)
+#define LRDX(v) do{LDB(0x48);LDB(0xC7);LDB(0xC2);LDQ(v);}while(0)
+#define LSYSCALL() do{LDB(0x0F);LDB(0x05);}while(0)
+#define LJNE() do{LDB(0x0F);LDB(0x85);patch[pc++]=n;n+=4;}while(0)
+    /* pipe2(fds, Linux O_CLOEXEC|O_NONBLOCK) must return zero. */
+    LRAX(293);LRDI(ATM_USER_BASE+0x380);LRSI(0x80800);LSYSCALL();LDB(0x48);LDB(0x85);LDB(0xC0);LJNE();
+    /* rdi=pipefd[0] from user memory; dup3(old,14,Linux O_CLOEXEC)==14. */
+    LDB(0x48);LDB(0x8B);LDB(0x3C);LDB(0x25);LDQ(ATM_USER_BASE+0x380);LRSI(14);LRDX(0x80000);LRAX(292);LSYSCALL();LDB(0x48);LDB(0x83);LDB(0xF8);LDB(14);LJNE();
+    LRAX(60);LRDI(42);LSYSCALL();LDB(0xF4);
+    uint32_t fail=n;LRAX(60);LRDI(1);LSYSCALL();LDB(0xF4);
+    for(uint32_t i=0;i<pc;i++){int32_t disp=(int32_t)fail-(int32_t)(patch[i]+4);kmemcpy(c+patch[i],&disp,4);}
+#undef LJNE
+#undef LSYSCALL
+#undef LRDX
+#undef LRSI
+#undef LRDI
+#undef LRAX
+#undef LDQ
+#undef LDB
+    if(!linux_abi_ready()){sdk_serial_write("[linux] descriptor-gate-closed\n");return -1;}
+    sdk_serial_write("[linux] descriptor-spawn\n");
+    int pid=native_app_spawn_memory("linux-descriptor",image,sizeof(image),10);if(pid<0)return -1;
+    int status=0,got=task_waitpid(pid,&status,0);
+    if(got==pid&&TASK_WIFEXITED(status)&&TASK_WEXITSTATUS(status)==42){sdk_serial_write("[linux] descriptor-ok\n");return 0;}
+    sdk_serial_write("[linux] descriptor-fail\n");return -1;
+}
+
+/* Linux x86-64 v14 process/session regression: real SYSCALL verifies the
+ * Linux numeric adapter without assuming a controlling terminal or job control. */
+int native_app_linux_session_selftest(void){
+    uint8_t image[0x1000];kmemset(image,0,sizeof(image));
+    Elf64_Ehdr *h=(Elf64_Ehdr *)image;
+    h->e_ident[EI_MAG0]=ELF_MAGIC0;h->e_ident[EI_MAG1]=ELF_MAGIC1;h->e_ident[EI_MAG2]=ELF_MAGIC2;h->e_ident[EI_MAG3]=ELF_MAGIC3;
+    h->e_ident[EI_CLASS]=2;h->e_ident[EI_DATA]=1;h->e_ident[EI_VERSION]=1;h->e_type=ET_EXEC;h->e_machine=EM_X86_64;h->e_version=1;
+    h->e_entry=ATM_USER_BASE+0x200;h->e_phoff=sizeof(Elf64_Ehdr);h->e_ehsize=sizeof(Elf64_Ehdr);h->e_phentsize=sizeof(Elf64_Phdr);h->e_phnum=1;
+    Elf64_Phdr *p=(Elf64_Phdr *)(image+h->e_phoff);p->p_type=PT_LOAD;p->p_flags=PF_R|PF_X;p->p_offset=0;p->p_vaddr=ATM_USER_BASE;p->p_filesz=0x400;p->p_memsz=0x400;p->p_align=ATM_PAGE_SIZE;
+    uint8_t *c=image+0x200;uint32_t n=0,patch[5],pc=0;
+#define LSB(x) do{c[n++]=(uint8_t)(x);}while(0)
+#define LSQ(v) do{uint32_t _v=(uint32_t)(v);LSB(_v);LSB(_v>>8);LSB(_v>>16);LSB(_v>>24);}while(0)
+#define LSRAX(v) do{LSB(0x48);LSB(0xC7);LSB(0xC0);LSQ(v);}while(0)
+#define LSRDI(v) do{LSB(0x48);LSB(0xC7);LSB(0xC7);LSQ(v);}while(0)
+#define LSRSI(v) do{LSB(0x48);LSB(0xC7);LSB(0xC6);LSQ(v);}while(0)
+#define LSSC() do{LSB(0x0F);LSB(0x05);}while(0)
+#define LSFAIL(cc) do{LSB(0x0F);LSB(cc);patch[pc++]=n;n+=4;}while(0)
+    /* pid=getpid(); getpgid(0) and getsid(0) must both equal pid initially. */
+    LSRAX(39);LSSC();LSB(0x48);LSB(0x85);LSB(0xC0);LSFAIL(0x8E);LSB(0x49);LSB(0x89);LSB(0xC0);
+    LSRAX(121);LSRDI(0);LSSC();LSB(0x4C);LSB(0x39);LSB(0xC0);LSFAIL(0x85);
+    LSRAX(124);LSRDI(0);LSSC();LSB(0x4C);LSB(0x39);LSB(0xC0);LSFAIL(0x85);
+    /* A leader may retain its own group; it cannot become a new session leader. */
+    LSRAX(109);LSRDI(0);LSRSI(0);LSSC();LSB(0x48);LSB(0x85);LSB(0xC0);LSFAIL(0x85);
+    LSRAX(112);LSSC();LSB(0x48);LSB(0x85);LSB(0xC0);LSFAIL(0x89);
+    LSRAX(60);LSRDI(42);LSSC();LSB(0xF4);
+    uint32_t fail=n;LSRAX(60);LSRDI(1);LSSC();LSB(0xF4);
+    for(uint32_t i=0;i<pc;i++){int32_t d=(int32_t)fail-(int32_t)(patch[i]+4);kmemcpy(c+patch[i],&d,4);}
+#undef LSFAIL
+#undef LSSC
+#undef LSRSI
+#undef LSRDI
+#undef LSRAX
+#undef LSQ
+#undef LSB
+    if(!linux_abi_ready()){sdk_serial_write("[linux] session-gate-closed\\n");return -1;}
+    sdk_serial_write("[linux] session-spawn\\n");
+    int pid=native_app_spawn_memory("linux-session",image,sizeof(image),10);if(pid<0)return -1;
+    int status=0,got=task_waitpid(pid,&status,0);
+    if(got==pid&&TASK_WIFEXITED(status)&&TASK_WEXITSTATUS(status)==42){sdk_serial_write("[linux] session-ok\\n");return 0;}
+    sdk_serial_write("[linux] session-fail\\n");return -1;
+}
+
+/* Linux x86-64 v22 regression: real SYSCALL verifies descriptor metadata,
+ * positional vector I/O, bounded runtime/path access and namespace mutation. */
+int native_app_linux_v22_selftest(void){
+    static const char path[]="/tmp/.atm-linux-v22";
+    uint8_t *image=(uint8_t *)kmalloc(0x1000);if(!image)return -1;kmemset(image,0,0x1000);
+    Elf64_Ehdr *h=(Elf64_Ehdr *)image;
+    h->e_ident[EI_MAG0]=ELF_MAGIC0;h->e_ident[EI_MAG1]=ELF_MAGIC1;h->e_ident[EI_MAG2]=ELF_MAGIC2;h->e_ident[EI_MAG3]=ELF_MAGIC3;
+    h->e_ident[EI_CLASS]=2;h->e_ident[EI_DATA]=1;h->e_ident[EI_VERSION]=1;h->e_type=ET_EXEC;h->e_machine=EM_X86_64;h->e_version=1;
+    h->e_entry=ATM_USER_BASE+0x200;h->e_phoff=sizeof(Elf64_Ehdr);h->e_ehsize=sizeof(Elf64_Ehdr);h->e_phentsize=sizeof(Elf64_Phdr);h->e_phnum=1;
+    Elf64_Phdr *p=(Elf64_Phdr *)(image+h->e_phoff);p->p_type=PT_LOAD;p->p_flags=PF_R|PF_W|PF_X;p->p_offset=0;p->p_vaddr=ATM_USER_BASE;p->p_filesz=0x1000;p->p_memsz=0x1000;p->p_align=ATM_PAGE_SIZE;
+    uint8_t *c=image+0x200;uint32_t n=0,patch[32],pc=0;
+#define L5B(x) do{c[n++]=(uint8_t)(x);}while(0)
+#define L5Q(v) do{uint32_t _v=(uint32_t)(v);L5B(_v);L5B(_v>>8);L5B(_v>>16);L5B(_v>>24);}while(0)
+#define L5U(v) do{uint64_t _v=(uint64_t)(v);for(int _i=0;_i<8;_i++)L5B(_v>>(8*_i));}while(0)
+#define L5RAX(v) do{L5B(0x48);L5B(0xC7);L5B(0xC0);L5Q(v);}while(0)
+#define L5RDI(v) do{L5B(0x48);L5B(0xC7);L5B(0xC7);L5Q(v);}while(0)
+#define L5RSI(v) do{L5B(0x48);L5B(0xC7);L5B(0xC6);L5Q(v);}while(0)
+#define L5RDX(v) do{L5B(0x48);L5B(0xC7);L5B(0xC2);L5Q(v);}while(0)
+#define L5R10(v) do{L5B(0x49);L5B(0xC7);L5B(0xC2);L5Q(v);}while(0)
+#define L5R8(v) do{L5B(0x49);L5B(0xC7);L5B(0xC0);L5Q(v);}while(0)
+#define L5SC() do{L5B(0x0F);L5B(0x05);}while(0)
+#define L5FAIL(cc) do{L5B(0x0F);L5B(cc);patch[pc++]=n;n+=4;}while(0)
+    /* open(path,O_RDWR|O_CREAT|O_TRUNC,0600) must yield a native fd >=3. */
+    L5RAX(2);L5RDI(ATM_USER_BASE+0xb00);L5RSI(0x242);L5RDX(0600);L5SC();L5B(0x48);L5B(0x83);L5B(0xF8);L5B(3);L5FAIL(0x8C);L5B(0x49);L5B(0x89);L5B(0xC4);
+    /* pwritev(fd,{{data,1},{data+1,2}},2,0,0)==3. */
+    L5RAX(296);L5B(0x4C);L5B(0x89);L5B(0xE7);L5RSI(ATM_USER_BASE+0xb60);L5RDX(2);L5R10(0);L5R8(0);L5SC();L5B(0x48);L5B(0x83);L5B(0xF8);L5B(3);L5FAIL(0x85);
+    /* Linux fchdir(open("/tmp",O_RDONLY|O_DIRECTORY)) validates the adapter. */
+    L5RAX(2);L5RDI(ATM_USER_BASE+0xb20);L5RSI(0x10000);L5RDX(0);L5SC();L5B(0x48);L5B(0x83);L5B(0xF8);L5B(3);L5FAIL(0x8C);L5B(0x49);L5B(0x89);L5B(0xC5);
+    L5RAX(81);L5B(0x4C);L5B(0x89);L5B(0xEF);L5SC();L5B(0x48);L5B(0x85);L5B(0xC0);L5FAIL(0x85);
+    L5RAX(3);L5B(0x4C);L5B(0x89);L5B(0xEF);L5SC();L5B(0x48);L5B(0x85);L5B(0xC0);L5FAIL(0x85);
+    /* Linux fchmod/fchown act on the owned opened descriptor. */
+    L5RAX(91);L5B(0x4C);L5B(0x89);L5B(0xE7);L5RSI(0600);L5SC();L5B(0x48);L5B(0x85);L5B(0xC0);L5FAIL(0x85);
+    L5RAX(93);L5B(0x4C);L5B(0x89);L5B(0xE7);L5RSI(0);L5RDX(0);L5SC();L5B(0x48);L5B(0x85);L5B(0xC0);L5FAIL(0x85);
+    /* Legacy Linux faccessat(AT_FDCWD,absolute_path,R_OK) has no flags argument. */
+    L5RAX(269);L5RDI((uint32_t)-100);L5RSI(ATM_USER_BASE+0xb00);L5RDX(4);L5SC();L5B(0x48);L5B(0x85);L5B(0xC0);L5FAIL(0x85);
+    /* preadv(fd,{{readback,1},{readback+1,2}},2,0,0)==3. */
+    L5RAX(295);L5B(0x4C);L5B(0x89);L5B(0xE7);L5RSI(ATM_USER_BASE+0xb90);L5RDX(2);L5R10(0);L5R8(0);L5SC();L5B(0x48);L5B(0x83);L5B(0xF8);L5B(3);L5FAIL(0x85);
+    L5B(0x48);L5B(0xBB);L5U(ATM_USER_BASE+0xbd0);L5B(0x80);L5B(0x3B);L5B('p');L5FAIL(0x85);L5B(0x80);L5B(0x7B);L5B(1);L5B('v');L5FAIL(0x85);L5B(0x80);L5B(0x7B);L5B(2);L5B('5');L5FAIL(0x85);
+    /* getrusage(RUSAGE_SELF,usage) returns zero and nonzero resident KiB. */
+    L5RAX(98);L5RDI(0);L5RSI(ATM_USER_BASE+0xc00);L5SC();L5B(0x48);L5B(0x85);L5B(0xC0);L5FAIL(0x85);
+    L5B(0x48);L5B(0xBB);L5U(ATM_USER_BASE+0xc00);L5B(0x48);L5B(0x83);L5B(0x7B);L5B(32);L5B(0);L5FAIL(0x8E);
+    /* times(tms) returns nonnegative uptime and a zero unavailable stime field. */
+    L5RAX(100);L5RDI(ATM_USER_BASE+0xcd0);L5SC();L5B(0x48);L5B(0x85);L5B(0xC0);L5FAIL(0x88);
+    L5B(0x48);L5B(0xBB);L5U(ATM_USER_BASE+0xcd0);L5B(0x48);L5B(0x83);L5B(0x7B);L5B(8);L5B(0);L5FAIL(0x85);
+    /* getrlimit(RLIMIT_NOFILE,limit) returns the fixed task descriptor ceiling. */
+    L5RAX(97);L5RDI(7);L5RSI(ATM_USER_BASE+0xe00);L5SC();L5B(0x48);L5B(0x85);L5B(0xC0);L5FAIL(0x85);
+    L5B(0x48);L5B(0xBB);L5U(ATM_USER_BASE+0xe00);L5B(0x48);L5B(0x83);L5B(0x3B);L5B(32);L5FAIL(0x85);
+    /* AT_FDCWD-only namespace mutation round trip. */
+    L5RAX(258);L5RDI((uint32_t)-100);L5RSI(ATM_USER_BASE+0xd00);L5RDX(0700);L5SC();L5B(0x48);L5B(0x85);L5B(0xC0);L5FAIL(0x85);
+    L5RAX(265);L5RDI((uint32_t)-100);L5RSI(ATM_USER_BASE+0xb00);L5RDX((uint32_t)-100);L5R10(ATM_USER_BASE+0xd30);L5R8(0);L5SC();L5B(0x48);L5B(0x85);L5B(0xC0);L5FAIL(0x85);
+    L5RAX(266);L5RDI(ATM_USER_BASE+0xd90);L5RSI((uint32_t)-100);L5RDX(ATM_USER_BASE+0xd70);L5SC();L5B(0x48);L5B(0x85);L5B(0xC0);L5FAIL(0x85);
+    L5RAX(267);L5RDI((uint32_t)-100);L5RSI(ATM_USER_BASE+0xd70);L5RDX(ATM_USER_BASE+0xda0);L5R10(4);L5SC();L5B(0x48);L5B(0x83);L5B(0xF8);L5B(3);L5FAIL(0x85);L5B(0x80);L5B(0x3A);L5B('s');L5FAIL(0x85);
+    L5RAX(264);L5RDI((uint32_t)-100);L5RSI(ATM_USER_BASE+0xd30);L5RDX((uint32_t)-100);L5R10(ATM_USER_BASE+0xd50);L5SC();L5B(0x48);L5B(0x85);L5B(0xC0);L5FAIL(0x85);
+    L5RAX(263);L5RDI((uint32_t)-100);L5RSI(ATM_USER_BASE+0xd70);L5RDX(0);L5SC();L5B(0x48);L5B(0x85);L5B(0xC0);L5FAIL(0x85);
+    L5RAX(263);L5RDI((uint32_t)-100);L5RSI(ATM_USER_BASE+0xd50);L5RDX(0);L5SC();L5B(0x48);L5B(0x85);L5B(0xC0);L5FAIL(0x85);
+    L5RAX(263);L5RDI((uint32_t)-100);L5RSI(ATM_USER_BASE+0xd00);L5RDX(0x200);L5SC();L5B(0x48);L5B(0x85);L5B(0xC0);L5FAIL(0x85);
+    /* Linux kill(getpid(),0) is a non-delivering self existence probe. */
+    L5RAX(39);L5SC();L5B(0x48);L5B(0x89);L5B(0xC7);L5RSI(0);L5RAX(62);L5SC();L5B(0x48);L5B(0x85);L5B(0xC0);L5FAIL(0x85);
+    L5RAX(3);L5B(0x4C);L5B(0x89);L5B(0xE7);L5SC();L5B(0x48);L5B(0x85);L5B(0xC0);L5FAIL(0x85);
+    L5RAX(60);L5RDI(42);L5SC();L5B(0xF4);
+    uint32_t fail=n;L5RAX(60);L5RDI(1);L5SC();L5B(0xF4);
+    for(uint32_t i=0;i<pc;i++){int32_t d=(int32_t)fail-(int32_t)(patch[i]+4);kmemcpy(c+patch[i],&d,4);}
+#undef L5FAIL
+#undef L5SC
+#undef L5R8
+#undef L5R10
+#undef L5RDX
+#undef L5RSI
+#undef L5RDI
+#undef L5RAX
+#undef L5U
+#undef L5Q
+#undef L5B
+    uint64_t out_iov[4]={ATM_USER_BASE+0xbc0,1,ATM_USER_BASE+0xbc1,2};
+    uint64_t in_iov[4]={ATM_USER_BASE+0xbd0,1,ATM_USER_BASE+0xbd1,2};
+    kmemcpy(image+0xb00,path,sizeof(path));kmemcpy(image+0xb20,"/tmp",5);kmemcpy(image+0xb60,out_iov,sizeof(out_iov));kmemcpy(image+0xb90,in_iov,sizeof(in_iov));kmemcpy(image+0xbc0,"pv5",3);
+    kmemcpy(image+0xd00,".atm-v22.d",11);kmemcpy(image+0xd30,".atm-v22.d/h",13);kmemcpy(image+0xd50,".atm-v22.d/m",13);kmemcpy(image+0xd70,".atm-v22.d/s",13);kmemcpy(image+0xd90,"src",4);
+    if(!linux_abi_ready()){kfree(image);sdk_serial_write("[linux] v22-gate-closed\\n");return -1;}
+    sdk_serial_write("[linux] v22-spawn\\n");int pid=native_app_spawn_memory("linux-v22",image,0x1000,10);kfree(image);if(pid<0)return -1;
+    int status=0,got=task_waitpid(pid,&status,0);(void)atm_posix_unlink(path);
+    if(got==pid&&TASK_WIFEXITED(status)&&TASK_WEXITSTATUS(status)==42){sdk_serial_write("[linux] v22-ok\\n");return 0;}
+    sdk_serial_write("[linux] v22-fail\\n");return -1;
 }
 
 /* Linux x86-64 L1 regression: real SYSCALL invokes brk, anonymous private
@@ -415,12 +602,23 @@ int native_app_exec_selftest(void){
 #define EXRSI(c,v) do{EXB(c,0x48);EXB(c,0xC7);EXB(c,0xC6);EXI(c,v);}while(0)
 #define EXRDX(c,v) do{EXB(c,0x48);EXB(c,0xC7);EXB(c,0xC2);EXI(c,v);}while(0)
 #define EXINT(c) do{EXB(c,0xCD);EXB(c,0x80);}while(0)
-    uint8_t *c=target+0x200;uint32_t n=0,j;
-    /* Target must see fd 3 already closed by FD_CLOEXEC processing. */
-    EXRAX(c,ATM_SYS_CLOSE);EXRDI(c,3);EXINT(c);EXB(c,0x48);EXB(c,0x85);EXB(c,0xC0);EXB(c,0x0F);EXB(c,0x89);j=n;n+=4;
+    uint8_t *c=target+0x200;uint32_t n=0,j,target_jumps[4],target_jc=0;
+    /* Replacement observes argc=2, argv[1]="arg" and envp[0]="K=V".
+     * Stack offsets are argc, argv[0..2], then envp[0]. */
+    EXB(c,0x48);EXB(c,0x89);EXB(c,0xE3); /* mov rbx,rsp */
+    EXB(c,0x48);EXB(c,0x83);EXB(c,0x3B);EXB(c,2); /* cmp qword [rbx],2 */
+    EXB(c,0x0F);EXB(c,0x85);target_jumps[target_jc++]=n;n+=4;
+    EXB(c,0x48);EXB(c,0x8B);EXB(c,0x43);EXB(c,0x10); /* argv[1] */
+    EXB(c,0x8B);EXB(c,0x08);EXB(c,0x81);EXB(c,0xF9);EXI(c,0x00677261u);
+    EXB(c,0x0F);EXB(c,0x85);target_jumps[target_jc++]=n;n+=4;
+    EXB(c,0x48);EXB(c,0x8B);EXB(c,0x43);EXB(c,0x20); /* envp[0] */
+    EXB(c,0x8B);EXB(c,0x08);EXB(c,0x81);EXB(c,0xF9);EXI(c,0x00563D4Bu);
+    EXB(c,0x0F);EXB(c,0x85);target_jumps[target_jc++]=n;n+=4;
+    /* Target must also see fd 3 closed by FD_CLOEXEC processing. */
+    EXRAX(c,ATM_SYS_CLOSE);EXRDI(c,3);EXINT(c);EXB(c,0x48);EXB(c,0x85);EXB(c,0xC0);EXB(c,0x0F);EXB(c,0x89);target_jumps[target_jc++]=n;n+=4;
     EXRAX(c,ATM_SYS_EXIT);EXRDI(c,42);EXINT(c);EXB(c,0xF4);
     uint32_t fail=n;EXRAX(c,ATM_SYS_EXIT);EXRDI(c,1);EXINT(c);EXB(c,0xF4);
-    {int32_t d=(int32_t)fail-(int32_t)(j+4);kmemcpy(c+j,&d,4);}
+    for(uint32_t i=0;i<target_jc;i++){int32_t d=(int32_t)fail-(int32_t)(target_jumps[i]+4);kmemcpy(c+target_jumps[i],&d,4);}
 
     c=runner+0x200;n=0;uint32_t jumps[2],jc=0;
     /* open(path,O_RDONLY) must allocate 3; then F_SETFD(FD_CLOEXEC). */
@@ -428,10 +626,15 @@ int native_app_exec_selftest(void){
     EXB(c,0x48);EXB(c,0x83);EXB(c,0xF8);EXB(c,3);EXB(c,0x0F);EXB(c,0x85);jumps[jc++]=n;n+=4;
     EXRAX(c,ATM_SYS_FCNTL);EXRDI(c,3);EXRSI(c,ATM_NATIVE_F_SETFD);EXRDX(c,ATM_NATIVE_FD_CLOEXEC);EXINT(c);
     EXB(c,0x48);EXB(c,0x85);EXB(c,0xC0);EXB(c,0x0F);EXB(c,0x85);jumps[jc++]=n;n+=4;
-    EXRAX(c,ATM_SYS_EXECVE);EXB(c,0x48);EXB(c,0xBF);kmemcpy(c+n,&path_va,8);n+=8;EXB(c,0x48);EXB(c,0x31);EXB(c,0xF6);EXB(c,0x48);EXB(c,0x31);EXB(c,0xD2);EXINT(c);
+    uint64_t argv_va=ATM_USER_BASE+0x780,env_va=ATM_USER_BASE+0x7a0;
+    EXRAX(c,ATM_SYS_EXECVE);EXB(c,0x48);EXB(c,0xBF);kmemcpy(c+n,&path_va,8);n+=8;EXB(c,0x48);EXB(c,0xBE);kmemcpy(c+n,&argv_va,8);n+=8;EXB(c,0x48);EXB(c,0xBA);kmemcpy(c+n,&env_va,8);n+=8;EXINT(c);
     fail=n;EXRAX(c,ATM_SYS_EXIT);EXRDI(c,1);EXINT(c);EXB(c,0xF4);
     for(uint32_t i=0;i<jc;i++){int32_t d=(int32_t)fail-(int32_t)(jumps[i]+4);kmemcpy(c+jumps[i],&d,4);}
     kmemcpy(runner+0x700,path,sizeof(path));
+    kmemcpy(runner+0x720,"exec-probe",11);kmemcpy(runner+0x730,"arg",4);kmemcpy(runner+0x740,"K=V",4);
+    uint64_t argv_words[3]={ATM_USER_BASE+0x720,ATM_USER_BASE+0x730,0};
+    uint64_t env_words[2]={ATM_USER_BASE+0x740,0};
+    kmemcpy(runner+0x780,argv_words,sizeof(argv_words));kmemcpy(runner+0x7a0,env_words,sizeof(env_words));
 #undef EXINT
 #undef EXRDX
 #undef EXRSI
@@ -504,6 +707,68 @@ int native_app_cpl3_wait_selftest(void){
     return -1;
 }
 
+/* CPL3 signal regression. A suspended child is relinked to a static parent
+ * before scheduling. The parent verifies the non-delivering signal-0 probe,
+ * terminates that direct child with SIGKILL and observes WTERMSIG==SIGKILL.
+ * No self delivery, group target or handler semantics are asserted here. */
+int native_app_cpl3_signal_selftest(void){
+    uint8_t *child_image=(uint8_t *)kmalloc(0x1000),*parent_image=(uint8_t *)kmalloc(0x1000);
+    if(!child_image||!parent_image){if(child_image)kfree(child_image);if(parent_image)kfree(parent_image);return -1;}
+    kmemset(child_image,0,0x1000);kmemset(parent_image,0,0x1000);
+    uint8_t *images[2]={child_image,parent_image};
+    for(int i=0;i<2;i++){
+        Elf64_Ehdr *h=(Elf64_Ehdr *)images[i];
+        h->e_ident[EI_MAG0]=ELF_MAGIC0;h->e_ident[EI_MAG1]=ELF_MAGIC1;h->e_ident[EI_MAG2]=ELF_MAGIC2;h->e_ident[EI_MAG3]=ELF_MAGIC3;
+        h->e_ident[EI_CLASS]=2;h->e_ident[EI_DATA]=1;h->e_ident[EI_VERSION]=1;h->e_type=ET_EXEC;h->e_machine=EM_X86_64;h->e_version=1;
+        h->e_entry=ATM_USER_BASE+0x200;h->e_phoff=sizeof(Elf64_Ehdr);h->e_ehsize=sizeof(Elf64_Ehdr);h->e_phentsize=sizeof(Elf64_Phdr);h->e_phnum=1;
+        Elf64_Phdr *p=(Elf64_Phdr *)(images[i]+h->e_phoff);p->p_type=PT_LOAD;p->p_flags=PF_R|PF_W|PF_X;p->p_offset=0;p->p_vaddr=ATM_USER_BASE;p->p_filesz=0x400;p->p_memsz=0x400;p->p_align=ATM_PAGE_SIZE;
+    }
+    child_image[0x200]=0xF4; /* It must be killed before ever executing. */
+    uint64_t flags=native_irq_save_disable();
+    int child_pid=native_app_spawn_memory("signal-child",child_image,0x1000,10);
+    task_t *child_task=child_pid>0?task_lookup_pid((uint32_t)child_pid):0;
+    if(!child_task||task_suspend_unstarted(child_task)<0){native_irq_restore(flags);kfree(parent_image);kfree(child_image);return -1;}
+
+    uint8_t *parent=parent_image+0x200;uint32_t n=0,patch[4],pc=0;
+#define SGB(x) do{parent[n++]=(uint8_t)(x);}while(0)
+#define SGQ(v) do{uint32_t _v=(uint32_t)(v);SGB(_v);SGB(_v>>8);SGB(_v>>16);SGB(_v>>24);}while(0)
+#define SGRAX(v) do{SGB(0x48);SGB(0xC7);SGB(0xC0);SGQ(v);}while(0)
+#define SGRDI(v) do{SGB(0x48);SGB(0xC7);SGB(0xC7);SGQ(v);}while(0)
+#define SGRSI(v) do{SGB(0x48);SGB(0xC7);SGB(0xC6);SGQ(v);}while(0)
+#define SGINT() do{SGB(0xCD);SGB(0x80);}while(0)
+#define SGFAIL(cc) do{SGB(0x0F);SGB(cc);patch[pc++]=n;n+=4;}while(0)
+    /* kill(child,0) must be non-delivering and succeed for a direct child. */
+    SGRAX(ATM_SYS_KILL);SGRDI(child_pid);SGRSI(0);SGINT();SGB(0x48);SGB(0x85);SGB(0xC0);SGFAIL(0x85);
+    /* SIGKILL must terminate a direct child before it executes. */
+    SGRAX(ATM_SYS_KILL);SGRDI(child_pid);SGRSI(9);SGINT();SGB(0x48);SGB(0x85);SGB(0xC0);SGFAIL(0x85);
+    SGRAX(ATM_SYS_WAITPID);SGRDI(child_pid);SGRSI(ATM_USER_BASE+0x300);SGB(0x31);SGB(0xD2);SGINT();
+    SGB(0x48);SGB(0x3D);SGQ(child_pid);SGFAIL(0x85);
+    SGB(0x48);SGB(0xBB);for(int i=0;i<8;i++)SGB((ATM_USER_BASE+0x300)>>(8*i));SGB(0x8B);SGB(0x03);SGB(0x3D);SGQ(9);SGFAIL(0x85);
+    SGRAX(ATM_SYS_EXIT);SGRDI(42);SGINT();SGB(0xF4);
+    uint32_t fail=n;SGRAX(ATM_SYS_EXIT);SGRDI(1);SGINT();SGB(0xF4);
+    for(uint32_t i=0;i<pc;i++){int32_t d=(int32_t)fail-(int32_t)(patch[i]+4);kmemcpy(parent+patch[i],&d,4);}
+#undef SGFAIL
+#undef SGINT
+#undef SGRSI
+#undef SGRDI
+#undef SGRAX
+#undef SGQ
+#undef SGB
+    int parent_pid=native_app_spawn_memory("signal-parent",parent_image,0x1000,10);
+    task_t *parent_task=parent_pid>0?task_lookup_pid((uint32_t)parent_pid):0;
+    if(!parent_task){
+        (void)task_kill((uint32_t)child_pid,127);int ignored=0;(void)task_waitpid(child_pid,&ignored,0);
+        native_irq_restore(flags);kfree(parent_image);kfree(child_image);return -1;
+    }
+    child_task->ppid=parent_task->pid;
+    native_irq_restore(flags);
+    sdk_serial_write("[native] cpl3-signal-spawn\\n");task_yield();
+    int status=0,got=task_waitpid(parent_pid,&status,0);
+    kfree(parent_image);kfree(child_image);
+    if(got==parent_pid&&TASK_WIFEXITED(status)&&TASK_WEXITSTATUS(status)==42){sdk_serial_write("[native] cpl3-signal-ok\\n");return 0;}
+    sdk_serial_write("[native] cpl3-signal-fail\\n");return -1;
+}
+
 /* Generated by `ld -r -b binary build/libc_smoke.elf`. The fixture is built
  * through Makefile and represents an external static C application, not
  * hand-assembled test instructions. */
@@ -529,8 +794,12 @@ int native_app_libc_selftest(void){
             else if(code==29) sdk_serial_write("[libc] smoke-fail-waitpid\n");
             else if(code==30) sdk_serial_write("[libc] smoke-fail-pipe\n");
             else if(code==31) sdk_serial_write("[libc] smoke-fail-dirent\n");
+            else if(code==32) sdk_serial_write("[libc] smoke-fail-runtime\n");
             else if(code==33) sdk_serial_write("[libc] smoke-fail-startup\n");
-            else {char status_text[40];ksnprintf(status_text,sizeof(status_text),"[libc] smoke-code-%d\\n",code);sdk_serial_write(status_text);}
+            else if(code==39) sdk_serial_write("[libc] smoke-fail-session\n");
+            else if(code==47) sdk_serial_write("[libc] smoke-fail-gethostname\n");
+            else if(code==51) sdk_serial_write("[libc] smoke-fail-getopt\n");
+            else sdk_serial_write("[libc] smoke-fail\n");
             return code==42?0:-1;
         }
         if(got<0) return -1;

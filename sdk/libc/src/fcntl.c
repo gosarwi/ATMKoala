@@ -6,7 +6,7 @@
 
 int fcntl(int fd,int cmd,...){
     uint32_t arg=0;
-    if(cmd==F_SETFL || cmd==F_SETFD || cmd==F_DUPFD){
+    if(cmd==F_SETFL || cmd==F_SETFD || cmd==F_DUPFD || cmd==F_DUPFD_CLOEXEC){
         __builtin_va_list ap;
         __builtin_va_start(ap,cmd);
         arg=(uint32_t)__builtin_va_arg(ap,int);

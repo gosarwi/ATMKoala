@@ -1,6 +1,7 @@
 #include "native_socket.h"
 #include "net_tcp.h"
 #include "net.h"
+#include "native_pipe.h"
 #include "util.h"
 #include <stddef.h>
 
@@ -65,12 +66,22 @@ int64_t native_socket_recv(task_t *t,int fd,void *b,uint64_t n,uint32_t timeout)
 int native_socket_close(task_t *t,int fd){
     socket_slot_t *s=slot_for(t,fd); if(!s)return -1; (void)atm_tcp_close(&s->conn);int idx=t->socket_map[fd];t->socket_map[fd]=-1;kmemset(&slots[idx],0,sizeof(slots[idx]));return 0;
 }
+uint16_t native_socket_poll(task_t *t,int fd,uint16_t events){
+    socket_slot_t *s=slot_for(t,fd);if(!s)return ATM_POLLNVAL;
+    atm_tcp_conn_t *c=&s->conn;uint16_t out=0;
+    if(c->state==ATM_TCP_ERROR)return ATM_POLLERR;
+    if(c->state==ATM_TCP_CLOSED||c->state==ATM_TCP_FIN_WAIT)out|=ATM_POLLHUP;
+    if(c->state==ATM_TCP_ESTABLISHED&&(events&ATM_POLLOUT))out|=ATM_POLLOUT;
+    if(events&ATM_POLLIN)for(int i=0;i<ATM_TCP_OOO_MAX;i++)if(c->ooo[i].used){out|=ATM_POLLIN;break;}
+    return out;
+}
 int native_socket_selftest(void){
-    task_t t;kmemset(&t,0,sizeof(t));
+    static task_t t;kmemset(&t,0,sizeof(t));
     /* A zeroed synthetic task does not carry task_create()'s -1 free-FD
      * invariant; initialize it explicitly before exercising socket_open(). */
     for(int i=0;i<TASK_FD_MAX;i++){t.fd_map[i]=-1;t.pipe_map[i]=-1;}
     t.fd_table_ready=1;
     native_socket_task_init(&t);
-    int fd=native_socket_open(&t,ATM_AF_INET,ATM_SOCK_STREAM,ATM_IPPROTO_TCP); if(fd!=3||!native_socket_is_fd(&t,fd)||native_socket_close(&t,fd)<0||native_socket_is_fd(&t,fd))return -1;return 0;
+    int fd=native_socket_open(&t,ATM_AF_INET,ATM_SOCK_STREAM,ATM_IPPROTO_TCP);
+    if(fd!=3||!native_socket_is_fd(&t,fd)||native_socket_poll(&t,fd,ATM_POLLOUT)!=ATM_POLLHUP||native_socket_close(&t,fd)<0||native_socket_is_fd(&t,fd))return -1;return 0;
 }

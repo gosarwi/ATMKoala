@@ -44,6 +44,8 @@ typedef void (*task_fn_t)(void);
 typedef struct task {
     uint32_t      pid;
     uint32_t      ppid;         /* creator PID; process hierarchy foundation */
+    uint32_t      pgid;         /* process-group identity (no terminal control yet) */
+    uint32_t      sid;          /* session identity (no controlling terminal yet) */
     uint32_t      uid, gid;     /* credentials snapshot at task creation */
     char          cwd[TASK_CWD_MAX]; /* task-local POSIX working directory */
     uint32_t      umask_value;  /* task-local POSIX creation mask */
@@ -82,7 +84,7 @@ typedef struct task {
 } task_t;
 
 typedef struct {
-    uint32_t pid, ppid, uid, gid;
+    uint32_t pid, ppid, pgid, sid, uid, gid;
     task_state_t state;
     uint32_t priority, context_switches;
     uint64_t cpu_ticks, created_ticks, state_changed_ticks;
@@ -109,7 +111,17 @@ int     task_kill(uint32_t pid, int code);
  * TASK_WAIT_NOHANG, return 0 while a matching child remains live. Without it,
  * a task sleeps until a matching child exits and then reaps its wait status. */
 int     task_waitpid(int32_t pid, int *status, uint32_t options);
-int     task_send_signal(uint32_t pid, int sig);
+/* POSIX-shaped kill(pid,0) existence/visibility probe: positive self/direct-child PID only. */
+int     task_signal_probe(int32_t pid);
+/* Delivery remains SIGTERM/SIGKILL only and accepts visible positive PIDs. */
+int     task_send_signal(int32_t pid, int sig);
+/* Bounded process-group/session identity substrate. Targets are restricted to
+ * the current task or direct children; no controlling terminal, orphan-group
+ * rules, stop/continue signals or cross-session job control exists yet. */
+int     task_getpgid(int32_t pid);
+int     task_setpgid(int32_t pid,int32_t pgid);
+int     task_getsid(int32_t pid);
+int     task_setsid(void);
 void    task_yield(void);
 void    task_block(void);
 /* CPL3 syscall sleep path: context-switches directly and later returns into

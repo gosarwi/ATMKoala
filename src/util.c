@@ -10,6 +10,27 @@
 extern void terminal_write(const char *s);
 extern void terminal_putchar(char c);
 
+static atm_kernel_log_entry_t g_kernel_logs[ATM_KERNEL_LOG_MAX];
+static uint32_t g_kernel_log_head;
+static uint32_t g_kernel_log_count;
+static uint32_t g_kernel_log_sequence;
+
+static void kernel_log_append(const char *text){
+    atm_kernel_log_entry_t *entry=&g_kernel_logs[g_kernel_log_head];
+    uint32_t n=0;
+    if(!text)return;
+    while(text[n]&&n+1u<ATM_KERNEL_LOG_TEXT_MAX){entry->text[n]=text[n];n++;}
+    while(n&&((entry->text[n-1u]=='\n')||(entry->text[n-1u]=='\r')))n--;
+    entry->text[n]=0;entry->sequence=++g_kernel_log_sequence;
+    g_kernel_log_head=(g_kernel_log_head+1u)%ATM_KERNEL_LOG_MAX;
+    if(g_kernel_log_count<ATM_KERNEL_LOG_MAX)g_kernel_log_count++;
+}
+int kernel_log_count(void){return (int)g_kernel_log_count;}
+const atm_kernel_log_entry_t *kernel_log_at(int index){
+    if(index<0||(uint32_t)index>=g_kernel_log_count)return 0;
+    return &g_kernel_logs[(g_kernel_log_head+ATM_KERNEL_LOG_MAX-g_kernel_log_count+(uint32_t)index)%ATM_KERNEL_LOG_MAX];
+}
+
 /* ── String functions ─────────────────────────────────────── */
 size_t kstrlen(const char *s) {
     size_t n = 0; while (s[n]) n++; return n;
@@ -127,61 +148,40 @@ void ku64toa(uint64_t n, char *buf, int base) {
     int j = 0; while (i--) buf[j++] = tmp[i]; buf[j] = 0;
 }
 
-/* ── ksnprintf — safe formatted print to buffer ───────────── */
-int ksnprintf(char *buf, size_t sz, const char *fmt, ...) {
-    va_list ap; va_start(ap, fmt);
-    size_t pos = 0;
-    char nb[32];
+/* ── Bounded formatter shared by ksnprintf and kernel log capture ── */
+static int kvsnprintf(char *buf,size_t sz,const char *fmt,va_list ap){
+    size_t pos=0;char nb[32];
+    if(!buf||!sz||!fmt)return 0;
 #define PUT(c) do { if (pos+1 < sz) buf[pos++] = (c); } while(0)
-    while (*fmt && pos+1 < sz) {
-        if (*fmt != '%') { PUT(*fmt++); continue; }
-        fmt++;
-        /* Width */
-        int width = 0, zero_pad = 0;
-        if (*fmt == '0') { zero_pad = 1; fmt++; }
-        while (kis_digit(*fmt)) { width = width*10 + (*fmt++ - '0'); }
-        /* Specifier */
-        if (*fmt == 'd') {
-            int n = va_arg(ap, int); kitoa(n, nb, 10);
-            size_t l = kstrlen(nb);
-            char pad = zero_pad ? '0' : ' ';
-            for (size_t i = l; (int)i < width; i++) PUT(pad);
-            for (size_t i = 0; nb[i]; i++) PUT(nb[i]);
-        } else if (*fmt == 'u') {
-            uint32_t n = va_arg(ap, uint32_t); kuitoa(n, nb, 10);
-            size_t l = kstrlen(nb);
-            char pad = zero_pad ? '0' : ' ';
-            for (size_t i = l; (int)i < width; i++) PUT(pad);
-            for (size_t i = 0; nb[i]; i++) PUT(nb[i]);
-        } else if (*fmt == 'x' || *fmt == 'X') {
-            uint32_t n = va_arg(ap, uint32_t); kuitoa(n, nb, 16);
-            if (*fmt == 'X') { for (int i=0;nb[i];i++) nb[i]=(char)kto_upper(nb[i]); }
-            size_t l = kstrlen(nb);
-            for (size_t i = l; (int)i < width; i++) PUT(zero_pad?'0':' ');
-            for (size_t i = 0; nb[i]; i++) PUT(nb[i]);
-        } else if (*fmt == 'p') {
-            uint32_t n = va_arg(ap, uint32_t); kuitoa(n, nb, 16);
-            PUT('0'); PUT('x');
-            for (size_t i = 0; nb[i]; i++) PUT(nb[i]);
-        } else if (*fmt == 's') {
-            const char *s = va_arg(ap, const char *); if (!s) s = "(null)";
-            while (*s) PUT(*s++);
-        } else if (*fmt == 'c') {
-            PUT((char)va_arg(ap, int));
-        } else if (*fmt == '%') {
-            PUT('%');
-        }
+    while(*fmt&&pos+1<sz){
+        if(*fmt!='%'){PUT(*fmt++);continue;}fmt++;
+        int width=0,zero_pad=0;if(*fmt=='0'){zero_pad=1;fmt++;}while(kis_digit(*fmt)){width=width*10+(*fmt++-'0');}
+        if(*fmt=='d'){
+            int n=va_arg(ap,int);kitoa(n,nb,10);size_t l=kstrlen(nb);char pad=zero_pad?'0':' ';for(size_t i=l;(int)i<width;i++)PUT(pad);for(size_t i=0;nb[i];i++)PUT(nb[i]);
+        } else if(*fmt=='u'){
+            uint32_t n=va_arg(ap,uint32_t);kuitoa(n,nb,10);size_t l=kstrlen(nb);char pad=zero_pad?'0':' ';for(size_t i=l;(int)i<width;i++)PUT(pad);for(size_t i=0;nb[i];i++)PUT(nb[i]);
+        } else if(*fmt=='x'||*fmt=='X'){
+            uint32_t n=va_arg(ap,uint32_t);kuitoa(n,nb,16);if(*fmt=='X')for(int i=0;nb[i];i++)nb[i]=(char)kto_upper(nb[i]);size_t l=kstrlen(nb);for(size_t i=l;(int)i<width;i++)PUT(zero_pad?'0':' ');for(size_t i=0;nb[i];i++)PUT(nb[i]);
+        } else if(*fmt=='p'){
+            uint32_t n=va_arg(ap,uint32_t);kuitoa(n,nb,16);PUT('0');PUT('x');for(size_t i=0;nb[i];i++)PUT(nb[i]);
+        } else if(*fmt=='s'){
+            const char *s=va_arg(ap,const char *);if(!s)s="(null)";while(*s)PUT(*s++);
+        } else if(*fmt=='c')PUT((char)va_arg(ap,int));
+        else if(*fmt=='%')PUT('%');
         fmt++;
     }
 #undef PUT
-    buf[pos] = 0;
-    va_end(ap);
-    return (int)pos;
+    buf[pos]=0;return (int)pos;
+}
+int ksnprintf(char *buf,size_t sz,const char *fmt,...){
+    va_list ap;int result;va_start(ap,fmt);result=kvsnprintf(buf,sz,fmt,ap);va_end(ap);return result;
 }
 
 /* ── kprintf — print to terminal ─────────────────────────── */
 void kprintf(const char *fmt, ...) {
-    va_list ap; va_start(ap, fmt);
+    va_list ap,log_ap; char logline[ATM_KERNEL_LOG_TEXT_MAX];
+    va_start(ap, fmt); va_copy(log_ap,ap);
+    (void)kvsnprintf(logline,sizeof(logline),fmt,log_ap); va_end(log_ap);
     char nb[32];
     while (*fmt) {
         if (*fmt != '%') { terminal_putchar(*fmt++); continue; }
@@ -218,6 +218,7 @@ void kprintf(const char *fmt, ...) {
         fmt++;
     }
     va_end(ap);
+    kernel_log_append(logline);
 }
 
 /* ── kpanic ───────────────────────────────────────────────── */

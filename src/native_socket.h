@@ -27,6 +27,9 @@ int64_t native_socket_send(task_t *task,int fd,const void *buf,uint64_t count);
 int64_t native_socket_recv(task_t *task,int fd,void *buf,uint64_t count,uint32_t timeout_ticks);
 int native_socket_close(task_t *task,int fd);
 int native_socket_is_fd(const task_t *task,int fd);
+/* Synchronous state-only readiness: established POLLOUT, queued out-of-order
+ * data POLLIN, terminal HUP/ERR. No listener-accept or wire-poll claim. */
+uint16_t native_socket_poll(task_t *task,int fd,uint16_t events);
 int native_socket_selftest(void);
 
 #endif

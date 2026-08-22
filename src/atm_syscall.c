@@ -25,11 +25,23 @@
 #define ATM_SYS_POLL_MAX 16
 #define ATM_AT_FDCWD (-100)
 #define ATM_AT_SYMLINK_NOFOLLOW 0x100u
+#define ATM_AT_REMOVEDIR 0x200u
 #define ATM_MSG_DONTWAIT 0x40u
 
 static uint64_t sys_result(int64_t value) { return (uint64_t)value; }
 
-uint32_t atm_syscall_abi_version(void) { return ATM_SYSCALL_ABI_V11; }
+typedef struct {
+    struct { int64_t tv_sec,tv_usec; } ru_utime,ru_stime;
+    int64_t ru_maxrss,ru_ixrss,ru_idrss,ru_isrss,ru_minflt,ru_majflt,ru_nswap;
+    int64_t ru_inblock,ru_oublock,ru_msgsnd,ru_msgrcv,ru_nsignals,ru_nvcsw,ru_nivcsw;
+} atm_sys_rusage_t;
+typedef struct { int64_t tms_utime,tms_stime,tms_cutime,tms_cstime; } atm_sys_tms_t;
+typedef struct { uint64_t rlim_cur,rlim_max; } atm_sys_rlimit_t;
+#define ATM_RLIMIT_STACK 3
+#define ATM_RLIMIT_NOFILE 7
+#define ATM_RLIMIT_AS 9
+
+uint32_t atm_syscall_abi_version(void) { return ATM_SYSCALL_ABI_V22; }
 
 static const user_space_t *sys_user_space(int from_user){
     task_t *t=sched_current();
@@ -105,10 +117,10 @@ static int64_t sys_fstat_user(const user_space_t *space,task_t *task,int fd,void
     return copy_to_user(space,user_stat,&st,sizeof(st))<0?-ATM_EFAULT:0;
 }
 
-static int64_t sys_pipe_user(const user_space_t *space,task_t *task,void *user_fds){
+static int64_t sys_pipe_user(const user_space_t *space,task_t *task,void *user_fds,uint32_t flags){
     int fds[2];
     if(!space || !task || !user_fds || user_range_valid(space,user_fds,sizeof(fds),1)<0) return -ATM_EFAULT;
-    if(native_fd_pipe(task,fds)<0) return -ATM_ENOMEM;
+    if(native_fd_pipe2(task,fds,flags)<0) return -ATM_EINVAL;
     if(copy_to_user(space,user_fds,fds,sizeof(fds))<0){
         (void)native_fd_close(task,fds[0]);
         (void)native_fd_close(task,fds[1]);
@@ -162,6 +174,16 @@ static int64_t sys_chmod_user(const user_space_t *space,const char *user_path,ui
     char *path=(char *)kmalloc(VFS_PATH_MAX);if(!path)return -ATM_ENOMEM;
     int64_t rc=sys_path_copy(space,user_path,path)<0?-ATM_EFAULT:atm_posix_chmod(path,mode&07777u);kfree(path);return rc;
 }
+static int64_t sys_chown_user(const user_space_t *space,const char *user_path,uint32_t uid,uint32_t gid){
+    char *path=(char *)kmalloc(VFS_PATH_MAX);if(!path)return -ATM_ENOMEM;
+    int64_t rc=sys_path_copy(space,user_path,path)<0?-ATM_EFAULT:atm_posix_chown(path,uid,gid);kfree(path);return rc;
+}
+static int64_t sys_getresid_user(const user_space_t *space,void *user_real,void *user_effective,void *user_saved,int group){
+    uint32_t id=group?atm_posix_getgid():atm_posix_getuid();
+    if(!space||!user_real||!user_effective||!user_saved||user_range_valid(space,user_real,sizeof(id),1)<0||user_range_valid(space,user_effective,sizeof(id),1)<0||user_range_valid(space,user_saved,sizeof(id),1)<0)return -ATM_EFAULT;
+    if(copy_to_user(space,user_real,&id,sizeof(id))<0||copy_to_user(space,user_effective,&id,sizeof(id))<0||copy_to_user(space,user_saved,&id,sizeof(id))<0)return -ATM_EFAULT;
+    return 0;
+}
 static int64_t sys_link_user(const user_space_t *space,const char *user_old,const char *user_new){
     char *oldpath=(char *)kmalloc(VFS_PATH_MAX),*newpath=(char *)kmalloc(VFS_PATH_MAX);if(!oldpath||!newpath){if(oldpath)kfree(oldpath);if(newpath)kfree(newpath);return -ATM_ENOMEM;}
     int64_t rc=(sys_path_copy(space,user_old,oldpath)<0||sys_path_copy(space,user_new,newpath)<0)?-ATM_EFAULT:atm_posix_link(oldpath,newpath);kfree(newpath);kfree(oldpath);return rc;
@@ -174,6 +196,33 @@ static int64_t sys_readlink_user(const user_space_t *space,const char *user_path
     if(!space||!user_buf||!size||size>VFS_PATH_MAX)return -ATM_EINVAL;
     char *path=(char *)kmalloc(VFS_PATH_MAX),*target=(char *)kmalloc(VFS_PATH_MAX);if(!path||!target){if(path)kfree(path);if(target)kfree(target);return -ATM_ENOMEM;}
     int64_t rc;if(sys_path_copy(space,user_path,path)<0||user_range_valid(space,user_buf,(size_t)size,1)<0)rc=-ATM_EFAULT;else{int n=atm_posix_readlink(path,target,(size_t)size);rc=n<0?n:(n&&copy_to_user(space,user_buf,target,(size_t)n)<0?-ATM_EFAULT:n);}kfree(target);kfree(path);return rc;
+}
+static int64_t sys_mkdir_user(const user_space_t *space,const char *user_path,uint32_t mode);
+static int64_t sys_access_user(const user_space_t *space,const char *user_path,int mode);
+static int64_t sys_rmdir_user(const user_space_t *space,const char *user_path);
+static int64_t sys_unlink_user(const user_space_t *space,const char *user_path);
+static int64_t sys_mkdirat_user(const user_space_t *space,int dirfd,const char *path,uint32_t mode){
+    return dirfd==ATM_AT_FDCWD?sys_mkdir_user(space,path,mode):-ATM_EINVAL;
+}
+static int64_t sys_faccessat_user(const user_space_t *space,int dirfd,const char *path,int mode,int flags){
+    return dirfd==ATM_AT_FDCWD&&flags==0?sys_access_user(space,path,mode):-ATM_EINVAL;
+}
+static int64_t sys_unlinkat_user(const user_space_t *space,int dirfd,const char *path,uint32_t flags){
+    if(dirfd!=ATM_AT_FDCWD)return -ATM_EINVAL;
+    if(flags==0)return sys_unlink_user(space,path);
+    return flags==ATM_AT_REMOVEDIR?sys_rmdir_user(space,path):-ATM_EINVAL;
+}
+static int64_t sys_renameat_user(const user_space_t *space,int olddirfd,const char *oldpath,int newdirfd,const char *newpath){
+    return olddirfd==ATM_AT_FDCWD&&newdirfd==ATM_AT_FDCWD?sys_rename_user(space,oldpath,newpath):-ATM_EINVAL;
+}
+static int64_t sys_linkat_user(const user_space_t *space,int olddirfd,const char *oldpath,int newdirfd,const char *newpath,uint32_t flags){
+    return olddirfd==ATM_AT_FDCWD&&newdirfd==ATM_AT_FDCWD&&flags==0?sys_link_user(space,oldpath,newpath):-ATM_EINVAL;
+}
+static int64_t sys_symlinkat_user(const user_space_t *space,const char *target,int newdirfd,const char *linkpath){
+    return newdirfd==ATM_AT_FDCWD?sys_symlink_user(space,target,linkpath):-ATM_EINVAL;
+}
+static int64_t sys_readlinkat_user(const user_space_t *space,int dirfd,const char *path,char *buf,uint64_t size){
+    return dirfd==ATM_AT_FDCWD?sys_readlink_user(space,path,buf,size):-ATM_EINVAL;
 }
 static int64_t sys_pread_user(const user_space_t *space,task_t *task,int fd,void *user_buf,uint64_t count,uint64_t offset){
     if(!space||(!user_buf&&count)||count>ATM_SYS_IO_MAX)return -ATM_EFAULT;
@@ -217,6 +266,53 @@ static int64_t sys_writev_user(const user_space_t *space,task_t *task,int fd,con
     uint8_t *tmp=(uint8_t *)kmalloc((size_t)total);if(!tmp)return -ATM_ENOMEM;uint64_t off=0;
     for(int i=0;i<iovcnt;i++){kernel_iov[i].iov_base=tmp+off;kernel_iov[i].iov_len=iov[i].iov_len;if(iov[i].iov_len&&copy_from_user(space,tmp+off,iov[i].iov_base,(size_t)iov[i].iov_len)<0){kfree(tmp);return -ATM_EFAULT;}off+=iov[i].iov_len;}
     int64_t n=native_fd_writev(task,fd,kernel_iov,iovcnt);kfree(tmp);return n;
+}
+static int64_t sys_preadv_user(const user_space_t *space,task_t *task,int fd,const void *user_iov,int iovcnt,uint64_t offset){
+    atm_posix_iovec_t iov[ATM_SYS_IOV_MAX],kernel_iov[ATM_SYS_IOV_MAX];uint64_t total=0;
+    int rc=sys_iov_prepare(space,user_iov,iovcnt,1,iov,&total);if(rc<0)return rc;if(!total)return 0;
+    uint8_t *tmp=(uint8_t *)kmalloc((size_t)total);if(!tmp)return -ATM_ENOMEM;uint64_t off=0;
+    for(int i=0;i<iovcnt;i++){kernel_iov[i].iov_base=tmp+off;kernel_iov[i].iov_len=iov[i].iov_len;off+=iov[i].iov_len;}
+    int64_t n=native_fd_preadv(task,fd,kernel_iov,iovcnt,offset);
+    if(n>0){uint64_t copied=0;for(int i=0;i<iovcnt&&copied<(uint64_t)n;i++){uint64_t part=iov[i].iov_len;if(part>(uint64_t)n-copied)part=(uint64_t)n-copied;if(part&&copy_to_user(space,iov[i].iov_base,tmp+copied,(size_t)part)<0){n=-ATM_EFAULT;break;}copied+=part;}}
+    kfree(tmp);return n;
+}
+static int64_t sys_pwritev_user(const user_space_t *space,task_t *task,int fd,const void *user_iov,int iovcnt,uint64_t offset){
+    atm_posix_iovec_t iov[ATM_SYS_IOV_MAX],kernel_iov[ATM_SYS_IOV_MAX];uint64_t total=0;
+    int rc=sys_iov_prepare(space,user_iov,iovcnt,0,iov,&total);if(rc<0)return rc;if(!total)return 0;
+    uint8_t *tmp=(uint8_t *)kmalloc((size_t)total);if(!tmp)return -ATM_ENOMEM;uint64_t off=0;
+    for(int i=0;i<iovcnt;i++){kernel_iov[i].iov_base=tmp+off;kernel_iov[i].iov_len=iov[i].iov_len;if(iov[i].iov_len&&copy_from_user(space,tmp+off,iov[i].iov_base,(size_t)iov[i].iov_len)<0){kfree(tmp);return -ATM_EFAULT;}off+=iov[i].iov_len;}
+    int64_t n=native_fd_pwritev(task,fd,kernel_iov,iovcnt,offset);kfree(tmp);return n;
+}
+static int64_t sys_getrlimit_user(const user_space_t *space,int resource,void *user_limit){
+    atm_sys_rlimit_t out;
+    if(!space||!user_limit||user_range_valid(space,user_limit,sizeof(out),1)<0)return -ATM_EFAULT;
+    switch(resource){
+    case ATM_RLIMIT_STACK:out.rlim_cur=out.rlim_max=TASK_STACK_SIZE;break;
+    case ATM_RLIMIT_NOFILE:out.rlim_cur=out.rlim_max=TASK_FD_MAX;break;
+    case ATM_RLIMIT_AS:out.rlim_cur=out.rlim_max=ATM_USER_WINDOW_SIZE;break;
+    default:return -ATM_EINVAL;
+    }
+    return copy_to_user(space,user_limit,&out,sizeof(out))<0?-ATM_EFAULT:0;
+}
+static int64_t sys_times_user(const user_space_t *space,task_t *task,void *user_tms){
+    atm_sys_tms_t out;
+    if(!space||!task)return -ATM_EFAULT;
+    kmemset(&out,0,sizeof(out));out.tms_utime=(int64_t)task->ticks;
+    if(user_tms){
+        if(user_range_valid(space,user_tms,sizeof(out),1)<0||copy_to_user(space,user_tms,&out,sizeof(out))<0)return -ATM_EFAULT;
+    }
+    return (int64_t)sched_uptime_ticks();
+}
+static int64_t sys_getrusage_user(const user_space_t *space,task_t *task,int who,void *user_usage){
+    atm_sys_rusage_t out;
+    if(!space||!task||who!=0)return -ATM_EINVAL;
+    if(!user_usage||user_range_valid(space,user_usage,sizeof(out),1)<0)return -ATM_EFAULT;
+    kmemset(&out,0,sizeof(out));
+    out.ru_utime.tv_sec=(int64_t)(task->ticks/100u);
+    out.ru_utime.tv_usec=(int64_t)((task->ticks%100u)*10000u);
+    out.ru_maxrss=(int64_t)(task->resident_bytes/1024u);
+    out.ru_nvcsw=(int64_t)task->context_switches;
+    return copy_to_user(space,user_usage,&out,sizeof(out))<0?-ATM_EFAULT:0;
 }
 static int64_t sys_getcwd_user(const user_space_t *space,char *user_buf,uint64_t size){
     char cwd[VFS_PATH_MAX];if(!space||!user_buf||!size||size>VFS_PATH_MAX)return -ATM_EFAULT;
@@ -356,24 +452,45 @@ static int64_t sys_gettimeofday_user(const user_space_t *space,void *user_out){
     return copy_to_user(space,user_out,&value,sizeof(value))<0?-ATM_EFAULT:0;
 }
 
-/* Restricted native exec ABI: argv is NULL or one copied argv[0], envp is
- * NULL or an explicitly empty vector. This prevents unbounded pointer-vector
- * walking until the process runtime supports full argument marshalling. */
+/* The syscall copies every accepted user pointer and string into a compact
+ * kernel payload before loading a replacement image. This keeps old-task state
+ * untouched on malformed vectors and caps stack construction deterministically. */
+static int64_t sys_exec_copy_vector(const user_space_t *space,const uint64_t *user_vector,
+                                    native_exec_payload_t *payload,uint16_t *offsets,
+                                    uint32_t *count,uint32_t maximum){
+    if(!user_vector)return 0;
+    for(uint32_t i=0;i<maximum;i++){
+        uint64_t user_string=0;size_t length=0;uint32_t room;
+        if(copy_from_user(space,&user_string,user_vector+i,sizeof(user_string))<0)return -ATM_EFAULT;
+        if(!user_string)return 0;
+        if(payload->bytes>=ATM_NATIVE_EXEC_STR_BYTES)return -ATM_EINVAL;
+        room=ATM_NATIVE_EXEC_STR_BYTES-payload->bytes;
+        if(strnlen_user(space,(const char *)(uintptr_t)user_string,room,&length)<0)return -ATM_EFAULT;
+        offsets[i]=(uint16_t)payload->bytes;
+        if(copy_from_user(space,payload->strings+payload->bytes,(const void *)(uintptr_t)user_string,length+1)<0)return -ATM_EFAULT;
+        payload->bytes+=(uint32_t)length+1u;*count=i+1u;
+    }
+    uint64_t terminator=0;
+    if(copy_from_user(space,&terminator,user_vector+maximum,sizeof(terminator))<0)return -ATM_EFAULT;
+    return terminator?-ATM_EINVAL:0;
+}
 static int64_t sys_execve_user(const user_space_t *space,task_t *task,registers_t *frame,
                                const char *user_path,const uint64_t *user_argv,const uint64_t *user_envp){
-    char path[VFS_PATH_MAX],name[VFS_PATH_MAX];
-    uint64_t first=0,second=0,envfirst=0;
-    if(!space||!task||!frame||copy_string_from_user(space,path,sizeof(path),user_path)<0) return -ATM_EFAULT;
-    if(user_argv){
-        if(copy_from_user(space,&first,user_argv,sizeof(first))<0) return -ATM_EFAULT;
-        if(first){
-            if(copy_from_user(space,&second,user_argv+1,sizeof(second))<0) return -ATM_EFAULT;
-            if(second||copy_string_from_user(space,name,sizeof(name),(const char *)(uintptr_t)first)<0) return -ATM_EINVAL;
-        } else kstrcpy(name,path);
-    } else kstrcpy(name,path);
-    if(user_envp && (copy_from_user(space,&envfirst,user_envp,sizeof(envfirst))<0 || envfirst))
-        return user_envp&&envfirst?-ATM_EINVAL:-ATM_EFAULT;
-    return native_app_exec_current(task,frame,path,name)<0?-ATM_EINVAL:0;
+    char path[VFS_PATH_MAX];native_exec_payload_t *payload;int64_t rc;
+    if(!space||!task||!frame||copy_string_from_user(space,path,sizeof(path),user_path)<0)return -ATM_EFAULT;
+    payload=(native_exec_payload_t *)kmalloc(sizeof(*payload));if(!payload)return -ATM_ENOMEM;
+    kmemset(payload,0,sizeof(*payload));
+    rc=sys_exec_copy_vector(space,user_argv,payload,payload->argv_off,&payload->argc,ATM_NATIVE_EXEC_MAX_ARGS);
+    if(rc<0)goto done;
+    if(!payload->argc){
+        size_t length=kstrlen(path)+1;
+        if(length>ATM_NATIVE_EXEC_STR_BYTES){rc=-ATM_EINVAL;goto done;}
+        payload->argc=1;payload->argv_off[0]=0;payload->bytes=(uint32_t)length;kmemcpy(payload->strings,path,length);
+    }
+    rc=sys_exec_copy_vector(space,user_envp,payload,payload->env_off,&payload->envc,ATM_NATIVE_EXEC_MAX_ENV);
+    if(rc<0)goto done;
+    rc=native_app_exec_current(task,frame,path,payload)<0?-ATM_EINVAL:0;
+ done:kfree(payload);return rc;
 }
 
 static int64_t sys_accept_user(const user_space_t *space,task_t *task,int fd,void *user_addr,uint64_t len){
@@ -456,10 +573,54 @@ uint64_t atm_syscall_dispatch(registers_t *r) {
     case ATM_SYS_WRITEV:
         return from_user ? sys_result(sys_writev_user(space,task,(int)r->rdi,(const void *)(uintptr_t)r->rsi,(int)r->rdx))
                          : sys_result(atm_posix_writev((int)r->rdi,(const atm_posix_iovec_t *)(uintptr_t)r->rsi,(int)r->rdx));
+    case ATM_SYS_PREADV:
+        return from_user ? sys_result(sys_preadv_user(space,task,(int)r->rdi,(const void *)(uintptr_t)r->rsi,(int)r->rdx,r->r10))
+                         : sys_result(-ATM_ENOSYS);
+    case ATM_SYS_PWRITEV:
+        return from_user ? sys_result(sys_pwritev_user(space,task,(int)r->rdi,(const void *)(uintptr_t)r->rsi,(int)r->rdx,r->r10))
+                         : sys_result(-ATM_ENOSYS);
+    case ATM_SYS_FCHDIR:
+        return from_user ? sys_result(native_fd_fchdir(task,(int)r->rdi))
+                         : sys_result(atm_posix_fchdir((int)r->rdi));
+    case ATM_SYS_GETRUSAGE:
+        return from_user ? sys_result(sys_getrusage_user(space,task,(int)r->rdi,(void *)(uintptr_t)r->rsi))
+                         : sys_result(-ATM_ENOSYS);
+    case ATM_SYS_TIMES:
+        return from_user ? sys_result(sys_times_user(space,task,(void *)(uintptr_t)r->rdi))
+                         : sys_result(-ATM_ENOSYS);
+    case ATM_SYS_FCHMOD:
+        return from_user ? sys_result(native_fd_fchmod(task,(int)r->rdi,(uint32_t)r->rsi))
+                         : sys_result(atm_posix_fchmod((int)r->rdi,(uint32_t)r->rsi));
+    case ATM_SYS_FCHOWN:
+        return from_user ? sys_result(native_fd_fchown(task,(int)r->rdi,(uint32_t)r->rsi,(uint32_t)r->rdx))
+                         : sys_result(atm_posix_fchown((int)r->rdi,(uint32_t)r->rsi,(uint32_t)r->rdx));
+    case ATM_SYS_GETRLIMIT:
+        return from_user ? sys_result(sys_getrlimit_user(space,(int)r->rdi,(void *)(uintptr_t)r->rsi))
+                         : sys_result(-ATM_ENOSYS);
+    case ATM_SYS_FACCESSAT:
+        return from_user ? sys_result(sys_faccessat_user(space,(int)r->rdi,(const char *)(uintptr_t)r->rsi,(int)r->rdx,(int)r->r10))
+                         : sys_result(-ATM_ENOSYS);
+    case ATM_SYS_MKDIRAT:
+        return from_user ? sys_result(sys_mkdirat_user(space,(int)r->rdi,(const char *)(uintptr_t)r->rsi,(uint32_t)r->rdx)) : sys_result(-ATM_ENOSYS);
+    case ATM_SYS_UNLINKAT:
+        return from_user ? sys_result(sys_unlinkat_user(space,(int)r->rdi,(const char *)(uintptr_t)r->rsi,(uint32_t)r->rdx)) : sys_result(-ATM_ENOSYS);
+    case ATM_SYS_RENAMEAT:
+        return from_user ? sys_result(sys_renameat_user(space,(int)r->rdi,(const char *)(uintptr_t)r->rsi,(int)r->rdx,(const char *)(uintptr_t)r->r10)) : sys_result(-ATM_ENOSYS);
+    case ATM_SYS_LINKAT:
+        return from_user ? sys_result(sys_linkat_user(space,(int)r->rdi,(const char *)(uintptr_t)r->rsi,(int)r->rdx,(const char *)(uintptr_t)r->r10,(uint32_t)r->r8)) : sys_result(-ATM_ENOSYS);
+    case ATM_SYS_SYMLINKAT:
+        return from_user ? sys_result(sys_symlinkat_user(space,(const char *)(uintptr_t)r->rdi,(int)r->rsi,(const char *)(uintptr_t)r->rdx)) : sys_result(-ATM_ENOSYS);
+    case ATM_SYS_READLINKAT:
+        return from_user ? sys_result(sys_readlinkat_user(space,(int)r->rdi,(const char *)(uintptr_t)r->rsi,(char *)(uintptr_t)r->rdx,r->r10)) : sys_result(-ATM_ENOSYS);
     case ATM_SYS_DUP:
         return from_user ? sys_result(native_fd_dup(task,(int)r->rdi)) : sys_result(atm_posix_dup((int)r->rdi));
     case ATM_SYS_DUP2:
         return from_user ? sys_result(native_fd_dup2(task,(int)r->rdi,(int)r->rsi)) : sys_result(atm_posix_dup2((int)r->rdi,(int)r->rsi));
+    case ATM_SYS_DUP3: {
+        if(!from_user)return sys_result(-ATM_ENOSYS);
+        int rc=native_fd_dup3(task,(int)r->rdi,(int)r->rsi,(uint32_t)r->rdx);
+        return sys_result(rc<0?-ATM_EINVAL:rc);
+    }
     case ATM_SYS_FSYNC:
         return from_user ? sys_result(native_fd_fsync(task,(int)r->rdi,0)) : sys_result(atm_posix_fsync((int)r->rdi));
     case ATM_SYS_FDATASYNC:
@@ -491,12 +652,32 @@ uint64_t atm_syscall_dispatch(registers_t *r) {
         return from_user ? sys_result(sys_readlink_user(space,(const char *)(uintptr_t)r->rdi,(char *)(uintptr_t)r->rsi,r->rdx)) : sys_result(atm_posix_readlink((const char *)(uintptr_t)r->rdi,(char *)(uintptr_t)r->rsi,(size_t)r->rdx));
     case ATM_SYS_CHMOD:
         return from_user ? sys_result(sys_chmod_user(space,(const char *)(uintptr_t)r->rdi,(uint32_t)r->rsi)) : sys_result(atm_posix_chmod((const char *)(uintptr_t)r->rdi,(uint32_t)r->rsi));
+    case ATM_SYS_CHOWN:
+        return from_user ? sys_result(sys_chown_user(space,(const char *)(uintptr_t)r->rdi,(uint32_t)r->rsi,(uint32_t)r->rdx)) : sys_result(atm_posix_chown((const char *)(uintptr_t)r->rdi,(uint32_t)r->rsi,(uint32_t)r->rdx));
     case ATM_SYS_UMASK:
         return sys_result((int64_t)atm_posix_umask((uint32_t)r->rdi));
     case ATM_SYS_ISATTY:
         return from_user ? sys_result(native_fd_isatty(task,(int)r->rdi)) : sys_result(atm_posix_isatty((int)r->rdi));
     case ATM_SYS_PIPE:
-        return from_user ? sys_result(sys_pipe_user(space,task,(void *)(uintptr_t)r->rdi)) : sys_result(-ATM_ENOSYS);
+        return from_user ? sys_result(sys_pipe_user(space,task,(void *)(uintptr_t)r->rdi,0)) : sys_result(-ATM_ENOSYS);
+    case ATM_SYS_PIPE2:
+        return from_user ? sys_result(sys_pipe_user(space,task,(void *)(uintptr_t)r->rdi,(uint32_t)r->rsi)) : sys_result(-ATM_ENOSYS);
+    case ATM_SYS_GETPGID: {
+        int rc=from_user?task_getpgid((int32_t)r->rdi):-1;
+        return sys_result(rc<0?-ATM_EINVAL:rc);
+    }
+    case ATM_SYS_SETPGID: {
+        int rc=from_user?task_setpgid((int32_t)r->rdi,(int32_t)r->rsi):-1;
+        return sys_result(rc<0?-ATM_EINVAL:rc);
+    }
+    case ATM_SYS_GETSID: {
+        int rc=from_user?task_getsid((int32_t)r->rdi):-1;
+        return sys_result(rc<0?-ATM_EINVAL:rc);
+    }
+    case ATM_SYS_SETSID: {
+        int rc=from_user?task_setsid():-1;
+        return sys_result(rc<0?-ATM_EINVAL:rc);
+    }
     case ATM_SYS_OPENDIR:
         return from_user ? sys_result(sys_opendir_user(space,task,(const char *)(uintptr_t)r->rdi)) : sys_result(-ATM_ENOSYS);
     case ATM_SYS_READDIR:
@@ -575,12 +756,22 @@ uint64_t atm_syscall_dispatch(registers_t *r) {
         return (uint64_t)atm_posix_getuid();
     case ATM_SYS_GETGID:
         return (uint64_t)atm_posix_getgid();
+    /* ATMKoala presently has one credential per task: effective and real IDs
+     * are intentionally identical until a capability/set-id model exists. */
+    case ATM_SYS_GETEUID:
+        return (uint64_t)atm_posix_getuid();
+    case ATM_SYS_GETEGID:
+        return (uint64_t)atm_posix_getgid();
+    case ATM_SYS_GETRESUID:
+        return from_user?sys_result(sys_getresid_user(space,(void *)(uintptr_t)r->rdi,(void *)(uintptr_t)r->rsi,(void *)(uintptr_t)r->rdx,0)):sys_result(-ATM_ENOSYS);
+    case ATM_SYS_GETRESGID:
+        return from_user?sys_result(sys_getresid_user(space,(void *)(uintptr_t)r->rdi,(void *)(uintptr_t)r->rsi,(void *)(uintptr_t)r->rdx,1)):sys_result(-ATM_ENOSYS);
     case ATM_SYS_GETTID: {
         task_t *t=sched_current();
         return t ? (uint64_t)t->pid : 0;
     }
     case ATM_SYS_ABI_INFO:
-        return (uint64_t)ATM_SYSCALL_ABI_V11;
+        return (uint64_t)ATM_SYSCALL_ABI_V22;
     default:
         return sys_result(-ATM_ENOSYS);
     }
@@ -712,6 +903,17 @@ int atm_syscall_selftest(void){
     if((int64_t)atm_syscall_dispatch(&r)<0)goto done;
     atm_posix_stat_t ust;if(copy_from_user(&space,&ust,(const void *)(uintptr_t)(ATM_USER_BASE+0x680),sizeof(ust))<0||ust.st_size!=kstrlen(payload))goto done;
     stage=16;
+    kmemset(&r,0,sizeof(r));r.cs=3;r.rax=ATM_SYS_CHOWN;r.rdi=ATM_USER_TOP+8;r.rsi=atm_posix_getuid();r.rdx=atm_posix_getgid();
+    if((int64_t)atm_syscall_dispatch(&r)!=-ATM_EFAULT)goto done;
+    r.rdi=ATM_USER_BASE+0x80;
+    if((int64_t)atm_syscall_dispatch(&r)<0)goto done;
+    kmemset(&r,0,sizeof(r));r.cs=3;r.rax=ATM_SYS_GETEUID;
+    if((uint32_t)atm_syscall_dispatch(&r)!=atm_posix_getuid())goto done;
+    r.rax=ATM_SYS_GETEGID;
+    if((uint32_t)atm_syscall_dispatch(&r)!=atm_posix_getgid())goto done;
+    r.rax=ATM_SYS_ABI_INFO;
+    if((uint32_t)atm_syscall_dispatch(&r)!=ATM_SYSCALL_ABI_V22)goto done;
+    stage=17;
     kmemset(&r,0,sizeof(r)); r.cs=3; r.rax=ATM_SYS_WRITE; r.rdi=(uint64_t)fd; r.rsi=ATM_USER_TOP+8; r.rdx=1;
     if((int64_t)atm_syscall_dispatch(&r)!=-ATM_EFAULT) goto done;
     rc=0;

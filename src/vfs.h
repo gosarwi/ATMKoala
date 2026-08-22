@@ -265,6 +265,11 @@ int          vfs_dup    (int fd);
 int          vfs_dup2   (int fd, int newfd);
 int          vfs_stat   (const char *path, vfs_stat_t *st);
 int          vfs_fstat  (int fd, vfs_stat_t *st);
+int          vfs_fchmod (int fd,uint32_t mode);
+int          vfs_fchown (int fd,uint32_t uid,uint32_t gid);
+/* Copies the canonical open path into a caller buffer for bounded descriptor
+ * operations such as fchdir; rejects invalid descriptors and short buffers. */
+int          vfs_fd_path(int fd,char *out,size_t size);
 int          vfs_lstat  (const char *path, vfs_stat_t *st);
 int          vfs_chmod  (const char *path, uint32_t mode);
 int          vfs_chown  (const char *path, uint32_t uid, uint32_t gid);

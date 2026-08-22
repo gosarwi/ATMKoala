@@ -41,8 +41,8 @@ static void out_hex64(uint64_t value) {
 
 void atmbox_print_applets(void) {
     outln("atm-box native Toybox-compatible applets:");
-    outln("  basename cat cmp cp dirname echo false free gpuinfo head hexdump id");
-    outln("  iostat kill ls mkdir mv ps rm stat touch true uname uptime wc");
+    outln("  basename cat cmp cp dirname echo false free gpuinfo grep head hexdump id");
+    outln("  iostat kill ls mkdir mv ps rm stat tail touch true uname uptime wc");
     outln("  Usage: atm-box <applet> [arguments]");
 }
 
@@ -123,6 +123,13 @@ static int app_head(int argc, char *argv[]) {
         for (int64_t i = 0; i < n && lines > 0; i++) { outc((char)buf[i]); if (buf[i] == '\n') lines--; }
     }
     vfs_close(fd); return n < 0 ? -1 : 0;
+}
+static int app_tail(int argc,char *argv[]){
+    if(argc<3){err("tail","usage: atm-box tail [-n N] <file>");return -1;}int arg=2,lines=10;if(argc>=5&&!kstrcmp(argv[2],"-n")){lines=kstrtoi(argv[3]);arg=4;}if(lines<0||lines>64||arg>=argc){err("tail","line count must be 0..64");return -1;}int fd=vfs_open(argv[arg],O_RDONLY,0);if(fd<0){err("tail","not found");return -1;}int64_t end=vfs_lseek(fd,0,SEEK_END);if(end<0){vfs_close(fd);err("tail","not seekable");return -1;}uint64_t base=(uint64_t)end>65536u?(uint64_t)end-65536u:0;if(vfs_lseek(fd,(int64_t)base,SEEK_SET)<0){vfs_close(fd);err("tail","seek failed");return -1;}uint64_t starts[65],pos=base;uint32_t count=1;starts[0]=base;uint8_t buf[256];int64_t n;while((n=vfs_read(fd,buf,sizeof(buf)))>0){for(int64_t i=0;i<n;i++,pos++)if(buf[i]=='\n'){starts[count%65u]=pos+1;count++;}}if(n<0){vfs_close(fd);err("tail","read failed");return -1;}uint32_t show=(uint32_t)lines<count?(uint32_t)lines:count;uint64_t start=starts[(count-show)%65u];if(vfs_lseek(fd,(int64_t)start,SEEK_SET)<0){vfs_close(fd);err("tail","seek failed");return -1;}uint32_t emitted=0;while(emitted<8192u&&(n=vfs_read(fd,buf,sizeof(buf)))>0){uint32_t take=(uint32_t)n;if(take>8192u-emitted)take=8192u-emitted;for(uint32_t i=0;i<take;i++)outc((char)buf[i]);emitted+=take;}vfs_close(fd);if(emitted==8192u)outln("atm-box tail: output capped at 8192 bytes");return 0;
+}
+static int line_contains(const char *line,const char *needle){size_t n=kstrlen(needle);if(!n)return 1;for(const char *p=line;*p;p++){size_t i=0;while(i<n&&p[i]&&p[i]==needle[i])i++;if(i==n)return 1;}return 0;}
+static int app_grep(int argc,char *argv[]){
+    if(argc!=4||!argv[2][0]||kstrlen(argv[2])>63u){err("grep","usage: atm-box grep <literal> <file> (literal 1..63 bytes)");return -1;}int fd=vfs_open(argv[3],O_RDONLY,0);if(fd<0){err("grep","not found");return -1;}char line[256];uint32_t used=0,matched=0,scanned=0;uint8_t buf[256];int64_t n;while(scanned<65536u&&(n=vfs_read(fd,buf,sizeof(buf)))>0){for(int64_t i=0;i<n&&scanned<65536u;i++,scanned++){uint8_t c=buf[i];if(c=='\n'){line[used]=0;if(line_contains(line,argv[2])){outln(line);if(++matched>=128u){outln("atm-box grep: matches capped at 128");vfs_close(fd);return 0;}}used=0;}else if(used+1<sizeof(line))line[used++]=(char)c;}}if(used){line[used]=0;if(line_contains(line,argv[2]))outln(line);}vfs_close(fd);if(scanned==65536u)outln("atm-box grep: scan capped at 65536 bytes");return n<0?-1:0;
 }
 static int app_wc(int argc, char *argv[]) {
     if (argc < 3) { err("wc", "usage: atm-box wc <file>"); return -1; }
@@ -231,6 +238,8 @@ int atmbox_dispatch(int argc, char *argv[]) {
     if (!kstrcmp(app,"dirname")) { if(argc<3){err(app,"usage: atm-box dirname <path>");return -1;} return print_parent(argv[2]); }
     if (!kstrcmp(app,"cat")) return app_cat(argc,argv);
     if (!kstrcmp(app,"head")) return app_head(argc,argv);
+    if (!kstrcmp(app,"tail")) return app_tail(argc,argv);
+    if (!kstrcmp(app,"grep")) return app_grep(argc,argv);
     if (!kstrcmp(app,"wc")) return app_wc(argc,argv);
     if (!kstrcmp(app,"ls")) return app_ls(argc,argv);
     if (!kstrcmp(app,"stat")) return app_stat(argc,argv);

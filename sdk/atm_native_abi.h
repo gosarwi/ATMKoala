@@ -10,7 +10,7 @@
 #include <stdint.h>
 
 #define ATM_NATIVE_ABI_MAJOR 1u
-#define ATM_NATIVE_ABI_MINOR 12u
+#define ATM_NATIVE_ABI_MINOR 22u
 
 #define ATM_SYS_READ       0u
 #define ATM_SYS_WRITE      1u
@@ -41,6 +41,7 @@
 #define ATM_SYS_SYMLINK   88u
 #define ATM_SYS_READLINK  89u
 #define ATM_SYS_CHMOD     90u
+#define ATM_SYS_CHOWN     92u
 #define ATM_SYS_UMASK     95u
 #define ATM_SYS_BRK       12u
 #define ATM_SYS_EXECVE    59u
@@ -51,6 +52,10 @@
 #define ATM_SYS_GETPPID  110u
 #define ATM_SYS_GETUID   102u
 #define ATM_SYS_GETGID   104u
+#define ATM_SYS_GETEUID  107u
+#define ATM_SYS_GETEGID  108u
+#define ATM_SYS_GETRESUID 118u
+#define ATM_SYS_GETRESGID 120u
 #define ATM_SYS_GETTID   186u
 #define ATM_SYS_ABI_INFO 0xA700u
 #define ATM_SYS_ISATTY   0xA701u
@@ -76,14 +81,38 @@
 #define ATM_SYS_FSTATAT  0xA716u
 #define ATM_SYS_SEND     0xA717u
 #define ATM_SYS_RECV     0xA718u
+#define ATM_SYS_DUP3     0xA719u
+#define ATM_SYS_PIPE2    0xA71Au
+#define ATM_SYS_GETPGID  0xA71Bu
+#define ATM_SYS_SETPGID  0xA71Cu
+#define ATM_SYS_GETSID   0xA71Du
+#define ATM_SYS_SETSID   0xA71Eu
+#define ATM_SYS_PREADV   0xA71Fu
+#define ATM_SYS_PWRITEV  0xA720u
+#define ATM_SYS_FCHDIR   0xA721u
+#define ATM_SYS_GETRUSAGE 0xA722u
+#define ATM_SYS_MKDIRAT   0xA723u
+#define ATM_SYS_UNLINKAT  0xA724u
+#define ATM_SYS_RENAMEAT  0xA725u
+#define ATM_SYS_LINKAT    0xA726u
+#define ATM_SYS_SYMLINKAT 0xA727u
+#define ATM_SYS_READLINKAT 0xA728u
+#define ATM_SYS_TIMES      0xA729u
+#define ATM_SYS_FCHMOD     0xA72Au
+#define ATM_SYS_FCHOWN     0xA72Bu
+#define ATM_SYS_GETRLIMIT   0xA72Cu
+#define ATM_SYS_FACCESSAT   0xA72Du
 
 typedef struct { void *iov_base; uint64_t iov_len; } atm_iovec_t;
 #define ATM_NAME_MAX 255
 #define ATM_O_ACCMODE 0x0003u
 #define ATM_AT_FDCWD (-100)
 #define ATM_AT_SYMLINK_NOFOLLOW 0x100u
+#define ATM_AT_REMOVEDIR 0x200u
 #define ATM_O_NONBLOCK 0x4000u
+#define ATM_O_CLOEXEC 0x2000u
 #define ATM_F_DUPFD 0
+#define ATM_F_DUPFD_CLOEXEC 1030
 #define ATM_F_GETFL 3
 #define ATM_F_SETFL 4
 /* Fixed packed wire record copied from kernel VFS to user memory. */
@@ -91,6 +120,17 @@ typedef struct __attribute__((packed)) { uint64_t d_ino; uint8_t d_type; char d_
 typedef struct { int fd; uint16_t events; uint16_t revents; } atm_pollfd_t;
 typedef struct { int64_t tv_sec; int64_t tv_nsec; } atm_clock_timespec_t;
 typedef struct { int64_t tv_sec; int64_t tv_usec; } atm_timeval_t;
+typedef struct { int64_t tms_utime,tms_stime,tms_cutime,tms_cstime; } atm_tms_t;
+typedef struct { uint64_t rlim_cur,rlim_max; } atm_rlimit_t;
+#define ATM_RLIMIT_STACK 3
+#define ATM_RLIMIT_NOFILE 7
+#define ATM_RLIMIT_AS 9
+typedef struct {
+    atm_timeval_t ru_utime,ru_stime;
+    int64_t ru_maxrss,ru_ixrss,ru_idrss,ru_isrss,ru_minflt,ru_majflt,ru_nswap;
+    int64_t ru_inblock,ru_oublock,ru_msgsnd,ru_msgrcv,ru_nsignals,ru_nvcsw,ru_nivcsw;
+} atm_rusage_t;
+#define ATM_RUSAGE_SELF 0
 #define ATM_UTS_FIELD_LEN 65u
 typedef struct {
     char sysname[ATM_UTS_FIELD_LEN];
@@ -111,7 +151,11 @@ typedef struct { uint64_t bits; } atm_fdset_t;
 #define ATM_POLLNVAL 0x0020u
 #define ATM_MSG_DONTWAIT 0x40u
 
+#define ATM_EPERM   1
+#define ATM_ESRCH   3
+#define ATM_EBADF   9
 #define ATM_EFAULT 14
+#define ATM_ENOTDIR 20
 #define ATM_ENOMEM 12
 #define ATM_EINVAL 22
 #define ATM_ENOSYS 38
@@ -203,14 +247,30 @@ static inline int64_t atm_pread(int fd,void *buf,uint64_t count,uint64_t offset)
 static inline int64_t atm_pwrite(int fd,const void *buf,uint64_t count,uint64_t offset){return atm_syscall4(ATM_SYS_PWRITE64,(uint64_t)fd,(uint64_t)(uintptr_t)buf,count,offset);}
 static inline int64_t atm_readv(int fd,const atm_iovec_t *iov,int iovcnt){return atm_syscall3(ATM_SYS_READV,(uint64_t)fd,(uint64_t)(uintptr_t)iov,(uint64_t)iovcnt);}
 static inline int64_t atm_writev(int fd,const atm_iovec_t *iov,int iovcnt){return atm_syscall3(ATM_SYS_WRITEV,(uint64_t)fd,(uint64_t)(uintptr_t)iov,(uint64_t)iovcnt);}
+static inline int64_t atm_preadv(int fd,const atm_iovec_t *iov,int iovcnt,uint64_t offset){return atm_syscall4(ATM_SYS_PREADV,(uint64_t)fd,(uint64_t)(uintptr_t)iov,(uint64_t)iovcnt,offset);}
+static inline int64_t atm_pwritev(int fd,const atm_iovec_t *iov,int iovcnt,uint64_t offset){return atm_syscall4(ATM_SYS_PWRITEV,(uint64_t)fd,(uint64_t)(uintptr_t)iov,(uint64_t)iovcnt,offset);}
 static inline int64_t atm_dup(int fd){return atm_syscall1(ATM_SYS_DUP,(uint64_t)fd);}
 static inline int64_t atm_dup2(int fd,int newfd){return atm_syscall2(ATM_SYS_DUP2,(uint64_t)fd,(uint64_t)newfd);}
+static inline int64_t atm_dup3(int fd,int newfd,uint32_t flags){return atm_syscall3(ATM_SYS_DUP3,(uint64_t)fd,(uint64_t)newfd,flags);}
 static inline int64_t atm_fsync(int fd){return atm_syscall1(ATM_SYS_FSYNC,(uint64_t)fd);}
 static inline int64_t atm_fdatasync(int fd){return atm_syscall1(ATM_SYS_FDATASYNC,(uint64_t)fd);}
 static inline int64_t atm_truncate(const char *path,uint64_t size){return atm_syscall2(ATM_SYS_TRUNCATE,(uint64_t)(uintptr_t)path,size);}
 static inline int64_t atm_ftruncate(int fd,uint64_t size){return atm_syscall2(ATM_SYS_FTRUNCATE,(uint64_t)fd,size);}
 static inline int64_t atm_getcwd(char *buf,uint64_t size){return atm_syscall2(ATM_SYS_GETCWD,(uint64_t)(uintptr_t)buf,size);}
 static inline int64_t atm_chdir(const char *path){return atm_syscall1(ATM_SYS_CHDIR,(uint64_t)(uintptr_t)path);}
+static inline int64_t atm_fchdir(int fd){return atm_syscall1(ATM_SYS_FCHDIR,(uint64_t)fd);}
+static inline int64_t atm_getrusage(int who,atm_rusage_t *usage){return atm_syscall2(ATM_SYS_GETRUSAGE,(uint64_t)(int64_t)who,(uint64_t)(uintptr_t)usage);}
+static inline int64_t atm_times(atm_tms_t *buf){return atm_syscall1(ATM_SYS_TIMES,(uint64_t)(uintptr_t)buf);}
+static inline int64_t atm_fchmod(int fd,uint32_t mode){return atm_syscall2(ATM_SYS_FCHMOD,(uint64_t)(int64_t)fd,mode);}
+static inline int64_t atm_fchown(int fd,uint32_t uid,uint32_t gid){return atm_syscall3(ATM_SYS_FCHOWN,(uint64_t)(int64_t)fd,uid,gid);}
+static inline int64_t atm_getrlimit(int resource,atm_rlimit_t *limit){return atm_syscall2(ATM_SYS_GETRLIMIT,(uint64_t)(int64_t)resource,(uint64_t)(uintptr_t)limit);}
+static inline int64_t atm_faccessat(int dirfd,const char *path,int mode,int flags){return atm_syscall4(ATM_SYS_FACCESSAT,(uint64_t)(int64_t)dirfd,(uint64_t)(uintptr_t)path,(uint64_t)(int64_t)mode,(uint64_t)(int64_t)flags);}
+static inline int64_t atm_mkdirat(int dirfd,const char *path,uint32_t mode){return atm_syscall3(ATM_SYS_MKDIRAT,(uint64_t)(int64_t)dirfd,(uint64_t)(uintptr_t)path,mode);}
+static inline int64_t atm_unlinkat(int dirfd,const char *path,uint32_t flags){return atm_syscall3(ATM_SYS_UNLINKAT,(uint64_t)(int64_t)dirfd,(uint64_t)(uintptr_t)path,flags);}
+static inline int64_t atm_renameat(int olddirfd,const char *oldpath,int newdirfd,const char *newpath){return atm_syscall4(ATM_SYS_RENAMEAT,(uint64_t)(int64_t)olddirfd,(uint64_t)(uintptr_t)oldpath,(uint64_t)(int64_t)newdirfd,(uint64_t)(uintptr_t)newpath);}
+static inline int64_t atm_linkat(int olddirfd,const char *oldpath,int newdirfd,const char *newpath,uint32_t flags){return atm_syscall5(ATM_SYS_LINKAT,(uint64_t)(int64_t)olddirfd,(uint64_t)(uintptr_t)oldpath,(uint64_t)(int64_t)newdirfd,(uint64_t)(uintptr_t)newpath,flags);}
+static inline int64_t atm_symlinkat(const char *target,int newdirfd,const char *linkpath){return atm_syscall3(ATM_SYS_SYMLINKAT,(uint64_t)(uintptr_t)target,(uint64_t)(int64_t)newdirfd,(uint64_t)(uintptr_t)linkpath);}
+static inline int64_t atm_readlinkat(int dirfd,const char *path,char *buf,uint64_t size){return atm_syscall4(ATM_SYS_READLINKAT,(uint64_t)(int64_t)dirfd,(uint64_t)(uintptr_t)path,(uint64_t)(uintptr_t)buf,size);}
 static inline int64_t atm_rename(const char *oldpath,const char *newpath){return atm_syscall2(ATM_SYS_RENAME,(uint64_t)(uintptr_t)oldpath,(uint64_t)(uintptr_t)newpath);}
 static inline int64_t atm_access(const char *path,int mode){return atm_syscall2(ATM_SYS_ACCESS,(uint64_t)(uintptr_t)path,(uint64_t)mode);}
 static inline int64_t atm_mkdir(const char *path,uint32_t mode){return atm_syscall2(ATM_SYS_MKDIR,(uint64_t)(uintptr_t)path,mode);}
@@ -220,9 +280,15 @@ static inline int64_t atm_unlink(const char *path){return atm_syscall1(ATM_SYS_U
 static inline int64_t atm_symlink(const char *target,const char *linkpath){return atm_syscall2(ATM_SYS_SYMLINK,(uint64_t)(uintptr_t)target,(uint64_t)(uintptr_t)linkpath);}
 static inline int64_t atm_readlink(const char *path,char *buf,uint64_t size){return atm_syscall3(ATM_SYS_READLINK,(uint64_t)(uintptr_t)path,(uint64_t)(uintptr_t)buf,size);}
 static inline int64_t atm_chmod(const char *path,uint32_t mode){return atm_syscall2(ATM_SYS_CHMOD,(uint64_t)(uintptr_t)path,mode);}
+static inline int64_t atm_chown(const char *path,uint32_t uid,uint32_t gid){return atm_syscall3(ATM_SYS_CHOWN,(uint64_t)(uintptr_t)path,uid,gid);}
 static inline uint64_t atm_umask(uint32_t mask){return (uint64_t)atm_syscall1(ATM_SYS_UMASK,mask);}
 static inline int64_t atm_isatty(int fd){return atm_syscall1(ATM_SYS_ISATTY,(uint64_t)fd);}
 static inline int64_t atm_pipe(int fds[2]){return atm_syscall1(ATM_SYS_PIPE,(uint64_t)(uintptr_t)fds);}
+static inline int64_t atm_pipe2(int fds[2],uint32_t flags){return atm_syscall2(ATM_SYS_PIPE2,(uint64_t)(uintptr_t)fds,flags);}
+static inline int64_t atm_getpgid(int pid){return atm_syscall1(ATM_SYS_GETPGID,(uint64_t)(int64_t)pid);}
+static inline int64_t atm_setpgid(int pid,int pgid){return atm_syscall2(ATM_SYS_SETPGID,(uint64_t)(int64_t)pid,(uint64_t)(int64_t)pgid);}
+static inline int64_t atm_getsid(int pid){return atm_syscall1(ATM_SYS_GETSID,(uint64_t)(int64_t)pid);}
+static inline int64_t atm_setsid(void){return atm_syscall0(ATM_SYS_SETSID);}
 static inline int64_t atm_opendir(const char *path){return atm_syscall1(ATM_SYS_OPENDIR,(uint64_t)(uintptr_t)path);}
 static inline int64_t atm_readdir(int handle,atm_dirent_t *entry){return atm_syscall2(ATM_SYS_READDIR,(uint64_t)handle,(uint64_t)(uintptr_t)entry);}
 static inline int64_t atm_closedir(int handle){return atm_syscall1(ATM_SYS_CLOSEDIR,(uint64_t)handle);}
@@ -250,17 +316,23 @@ static inline int64_t atm_accept(int fd,void *addr,uint64_t addrlen){
 static inline int64_t atm_send(int fd,const void *buf,uint64_t count,uint32_t flags){return atm_syscall4(ATM_SYS_SEND,(uint64_t)fd,(uint64_t)(uintptr_t)buf,count,flags);}
 static inline int64_t atm_recv(int fd,void *buf,uint64_t count,uint32_t flags){return atm_syscall4(ATM_SYS_RECV,(uint64_t)fd,(uint64_t)(uintptr_t)buf,count,flags);}
 static inline uint64_t atm_brk(uint64_t requested){ return (uint64_t)atm_syscall1(ATM_SYS_BRK,requested); }
-/* Restricted native exec: static ET_EXEC only, argv is NULL or argv[0] plus
- * terminator, and envp is NULL or an empty vector. Success does not return. */
+/* Restricted native exec: static ET_EXEC only; up to 16 argv entries, 16 envp
+ * entries and 2 KiB of copied NUL-terminated strings. Success does not return. */
 static inline int64_t atm_execve(const char *path,char *const argv[],char *const envp[]){
     return atm_syscall3(ATM_SYS_EXECVE,(uint64_t)(uintptr_t)path,(uint64_t)(uintptr_t)argv,(uint64_t)(uintptr_t)envp);
 }
 static inline int64_t atm_waitpid(int pid,int *status,int options){return atm_syscall3(ATM_SYS_WAITPID,(uint64_t)(int64_t)pid,(uint64_t)(uintptr_t)status,(uint64_t)options);}
+/* `sig==0` probes a positive self/direct-child PID. Delivery is limited to
+ * SIGTERM (15) and SIGKILL (9) for direct children; group/self delivery is absent. */
 static inline int64_t atm_kill(int pid,int sig){return atm_syscall2(ATM_SYS_KILL,(uint64_t)(int64_t)pid,(uint64_t)(int64_t)sig);}
 static inline uint64_t atm_getpid(void){ return (uint64_t)atm_syscall0(ATM_SYS_GETPID); }
 static inline uint64_t atm_getppid(void){ return (uint64_t)atm_syscall0(ATM_SYS_GETPPID); }
 static inline uint64_t atm_getuid(void){ return (uint64_t)atm_syscall0(ATM_SYS_GETUID); }
 static inline uint64_t atm_getgid(void){ return (uint64_t)atm_syscall0(ATM_SYS_GETGID); }
+static inline uint64_t atm_geteuid(void){ return (uint64_t)atm_syscall0(ATM_SYS_GETEUID); }
+static inline uint64_t atm_getegid(void){ return (uint64_t)atm_syscall0(ATM_SYS_GETEGID); }
+static inline int64_t atm_getresuid(uint32_t *real,uint32_t *effective,uint32_t *saved){return atm_syscall3(ATM_SYS_GETRESUID,(uint64_t)(uintptr_t)real,(uint64_t)(uintptr_t)effective,(uint64_t)(uintptr_t)saved);}
+static inline int64_t atm_getresgid(uint32_t *real,uint32_t *effective,uint32_t *saved){return atm_syscall3(ATM_SYS_GETRESGID,(uint64_t)(uintptr_t)real,(uint64_t)(uintptr_t)effective,(uint64_t)(uintptr_t)saved);}
 static inline uint64_t atm_abi_info(void){ return (uint64_t)atm_syscall0(ATM_SYS_ABI_INFO); }
 __attribute__((noreturn)) static inline void atm_exit(int status){
     (void)atm_syscall1(ATM_SYS_EXIT,(uint64_t)status);

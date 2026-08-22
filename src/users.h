@@ -38,6 +38,8 @@ int                 user_init(const char *legacy_pin);
 int                 user_save(void);
 
 /* Account operations. Return 0 on success, negative errno-style code on error. */
+/* Pure syntax validation for installer/UI staging; it never touches storage. */
+int                 user_name_is_valid(const char *name);
 int                 user_add(const char *name, user_role_t role, const char *password);
 int                 user_del(const char *name);
 int                 user_set_password(const char *name, const char *password);

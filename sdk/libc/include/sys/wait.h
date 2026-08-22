@@ -13,5 +13,7 @@
 #define WTERMSIG(status) ((status) & 0x7f)
 
 pid_t waitpid(pid_t pid,int *status,int options);
+/* Equivalent to waitpid(-1, status, 0): blocks for one direct child only. */
+pid_t wait(int *status);
 
 #endif

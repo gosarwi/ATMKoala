@@ -1162,6 +1162,26 @@ int vfs_stat(const char *path, vfs_stat_t *st) {
     return r;
 }
 
+int vfs_fd_path(int fd,char *out,size_t size){
+    if(fd<0||fd>=FD_MAX||!g_fds[fd].used||!out||!size){errno=EINVAL;return -1;}
+    size_t n=kstrlen(g_fds[fd].path)+1;
+    if(n>size){errno=EINVAL;return -1;}
+    kmemcpy(out,g_fds[fd].path,n);return 0;
+}
+
+int vfs_fchmod(int fd,uint32_t mode){
+    if(fd<0||fd>=FD_MAX||!g_fds[fd].used){errno=EINVAL;return -1;}
+    vfs_inode_t *i=g_fds[fd].inode;
+    if(g_session_uid!=0&&g_session_uid!=i->uid){errno=EACCES;return -1;}
+    return i->ops&&i->ops->chmod?i->ops->chmod(i,mode&07777U):-EINVAL;
+}
+int vfs_fchown(int fd,uint32_t uid,uint32_t gid){
+    if(fd<0||fd>=FD_MAX||!g_fds[fd].used){errno=EINVAL;return -1;}
+    vfs_inode_t *i=g_fds[fd].inode;
+    if(g_session_uid!=0){errno=EACCES;return -1;}
+    return i->ops&&i->ops->chown?i->ops->chown(i,uid,gid):-EINVAL;
+}
+
 int vfs_fstat(int fd, vfs_stat_t *st) {
     if (fd < 0 || fd >= FD_MAX || !g_fds[fd].used) { errno=EINVAL; return -1; }
     vfs_inode_t *i = g_fds[fd].inode;

@@ -20,6 +20,10 @@ typedef struct {
 /* Safe to call when no mouse is present: available remains zero. */
 void mouse_init(int screen_w, int screen_h);
 const mouse_state_t *mouse_state(void);
+/* Copies one coherent cursor sample; returns zero only if IRQ updates never
+ * quiesce across the bounded retry window. */
+int mouse_snapshot(mouse_state_t *out);
+int mouse_packet_selftest(void);
 const char *mouse_status_string(void);
 
 #endif

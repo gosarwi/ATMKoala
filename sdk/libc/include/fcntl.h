@@ -17,15 +17,17 @@
 #define O_NONBLOCK 0x4000u
 
 #define F_DUPFD 0
+#define F_DUPFD_CLOEXEC 1030
 #define F_GETFD 1
 #define F_SETFD 2
 #define F_GETFL 3
 #define F_SETFL 4
 #define FD_CLOEXEC 1
 
-/* Native v1.11 at-style subset: only AT_FDCWD is implemented. */
+/* Native v1.18 at-style subset: only AT_FDCWD is implemented. */
 #define AT_FDCWD (-100)
 #define AT_SYMLINK_NOFOLLOW 0x100u
+#define AT_REMOVEDIR 0x200u
 
 int open(const char *path,int flags,...);
 int openat(int dirfd,const char *path,int flags,...);

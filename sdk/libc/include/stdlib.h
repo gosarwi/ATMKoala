@@ -18,6 +18,11 @@ void *realloc(void *ptr,size_t size);
 void  free(void *ptr);
 void  exit(int status) __attribute__((noreturn));
 
+/* Environment entries are supplied by bounded native execve startup. The
+ * current static runtime exposes read-only lookup; setenv/putenv are absent. */
+extern char **environ;
+char *getenv(const char *name);
+
 int abs(int value);
 long labs(long value);
 long long llabs(long long value);

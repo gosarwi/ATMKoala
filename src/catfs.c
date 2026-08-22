@@ -426,6 +426,33 @@ static void free_all_blocks(catfs_inode_t *in) {
         bm_free(in->dindirect); in->dindirect = 0;
     }
 }
+/* Release every allocated data block at or beyond `first`, and release pointer
+ * sectors only after their final child has gone. This closes the old direct-only
+ * truncate leak without inventing sparse-file semantics. */
+static int free_blocks_from(catfs_inode_t *in,uint32_t first){
+    uint8_t sec[SECTOR_SIZE],l1[SECTOR_SIZE];
+    for(uint32_t i=first;i<CATFS_DIRECT_BLOCKS;i++)if(in->blocks[i]){bm_free(in->blocks[i]);in->blocks[i]=0;}
+    if(in->indirect){
+        if(dsk_read(block_lba(in->indirect),sec)<0)return -1;
+        uint32_t *p=(uint32_t *)sec,start=first>CATFS_DIRECT_BLOCKS?first-CATFS_DIRECT_BLOCKS:0;int any=0;
+        for(uint32_t i=0;i<CATFS_PTRS_PER_BLOCK;i++){if(i>=start&&p[i]){bm_free(p[i]);p[i]=0;}if(p[i])any=1;}
+        if(any){if(dsk_write(block_lba(in->indirect),sec)<0)return -1;}else{bm_free(in->indirect);in->indirect=0;}
+    }
+    if(in->dindirect){
+        if(dsk_read(block_lba(in->dindirect),l1)<0)return -1;
+        uint32_t *p1=(uint32_t *)l1;int any_l1=0;uint32_t base0=CATFS_DIRECT_BLOCKS+CATFS_PTRS_PER_BLOCK;
+        for(uint32_t i=0;i<CATFS_PTRS_PER_BLOCK;i++){
+            if(!p1[i])continue;uint32_t base=base0+i*CATFS_PTRS_PER_BLOCK;
+            if(first>=base+CATFS_PTRS_PER_BLOCK){any_l1=1;continue;}
+            if(dsk_read(block_lba(p1[i]),sec)<0)return -1;
+            uint32_t *p2=(uint32_t *)sec,start=first>base?first-base:0;int any_l2=0;
+            for(uint32_t j=0;j<CATFS_PTRS_PER_BLOCK;j++){if(j>=start&&p2[j]){bm_free(p2[j]);p2[j]=0;}if(p2[j])any_l2=1;}
+            if(any_l2){if(dsk_write(block_lba(p1[i]),sec)<0)return -1;any_l1=1;}else{bm_free(p1[i]);p1[i]=0;}
+        }
+        if(any_l1){if(dsk_write(block_lba(in->dindirect),l1)<0)return -1;}else{bm_free(in->dindirect);in->dindirect=0;}
+    }
+    return 0;
+}
 
 int catfs_unlink(int idx) {
     if (!catfs.mounted || idx <= 0 || idx >= CATFS_INODE_MAX) return -1;
@@ -626,21 +653,17 @@ int catfs_truncate(int idx, uint32_t new_size) {
     catfs_inode_t *in = &catfs.inodes[idx];
     if (in->type == CATFS_TYPE_FREE || in->type == CATFS_TYPE_DIR) return -1;
 
-    journal_log(CATFS_J_WRITE_META, (uint32_t)idx, in->size, new_size);
+    if(journal_log(CATFS_J_WRITE_META, (uint32_t)idx, in->size, new_size)<0)return -1;
     if (new_size < in->size) {
         uint32_t first_freed = (new_size + CATFS_BLOCK_SIZE - 1) / CATFS_BLOCK_SIZE;
-        uint32_t old_blocks  = (in->size + CATFS_BLOCK_SIZE - 1) / CATFS_BLOCK_SIZE;
-        for (uint32_t b = first_freed; b < old_blocks && b < CATFS_DIRECT_BLOCKS; b++)
-            if (in->blocks[b]) { bm_free(in->blocks[b]); in->blocks[b] = 0; }
+        if(free_blocks_from(in,first_freed)<0)return -1;
     }
     in->size = new_size;
     in->mtime = catfs_now();
 
-    sync_inode(idx);
-    sync_superblock();
-    sync_bitmap_region(0, CATFS_BLOCKS_MAX - 1);
-    journal_commit();
-    return 0;
+    if(sync_inode(idx)<0||sync_superblock()<0||
+       sync_bitmap_region(0, CATFS_BLOCKS_MAX - 1)<0)return -1;
+    return journal_commit();
 }
 
 int catfs_listdir(int dir_idx, char names[][CATFS_NAME_MAX], int *count) {

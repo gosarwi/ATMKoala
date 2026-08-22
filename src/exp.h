@@ -61,7 +61,8 @@ extern exp_palette_t exp_palette;
 typedef enum {
     APP_NONE=0, APP_TERMINAL, APP_FILES, APP_EDITOR, APP_NOTEPAD,
     APP_SYSMON, APP_SETTINGS, APP_VIEWER, APP_ABOUT, APP_CALCULATOR,
-    APP_TASKS, APP_JOURNAL, APP_CLOCK, APP_CALENDAR, APP_TINYGL, APP_MINES, APP_SNAKE, APP_PAINT,
+    APP_TASKS, APP_JOURNAL, APP_CLOCK, APP_CALENDAR, APP_TINYGL, APP_MINES, APP_SNAKE, APP_FLAPPY, APP_TETRIS, APP_PAINT,
+    APP_SYSINFO, APP_EVENTLOG, APP_POWER, APP_SCREENSHOTS,
     APP_IMAGE_VIEWER, /* legacy internal compatibility ID */
     APP_ARCHIVEEX,
     APP_EXTERNAL=0x70,
@@ -137,11 +138,26 @@ typedef struct {
     int length, dx, dy, score, state;
     uint32_t last_tick;
 } exp_snake_t;
+/* Single-pipe, fixed-step desktop arcade state. All coordinates are relative
+ * to the playfield, and score is intentionally session-local. */
+typedef struct {
+    int bird_y, velocity, pipe_x, gap_y, score, state;
+    uint32_t last_tick;
+} exp_flappy_t;
+#define EXP_TETRIS_W 10
+#define EXP_TETRIS_H 20
+typedef struct {
+    uint8_t board[EXP_TETRIS_H][EXP_TETRIS_W];
+    int piece, rotation, x, y, next, score, lines, state;
+    uint32_t seed, last_tick;
+} exp_tetris_t;
 #define EXP_PAINT_W 32
 #define EXP_PAINT_H 18
 typedef struct {
     uint8_t pixels[EXP_PAINT_H][EXP_PAINT_W];
-    int cursor_x, cursor_y, color;
+    uint8_t undo[EXP_PAINT_H][EXP_PAINT_W];
+    int cursor_x, cursor_y, color, undo_valid;
+    int anchor_x, anchor_y, anchor_valid;
 } exp_paint_t;
 
 typedef struct {
@@ -174,6 +190,8 @@ typedef struct {
     fm_entry_t fm_ent[FM_MAX_ENTRIES];
     int        fm_count, fm_sel, fm_scroll;
     char       fm_preview[512];
+    char       fm_clip_path[128];
+    int        fm_clip_move;
 
     /* Editor */
     char       ed_path[128];
@@ -184,10 +202,21 @@ typedef struct {
     /* Sysmon */
     sysmon_t   sysmon;
 
+    /* Read-only Events viewer: 0=init/service ring, 1=kernel formatter ring. */
+    int       log_mode, log_scroll;
+
+    /* Power menu: 0=none, 1=halt pending, 2=reboot pending. */
+    int       power_action;
+
+    /* Screenshots: sequential session-local counter and last capture result.
+     * The pixel data is streamed directly to a PPM file, not retained here. */
+    int       screenshot_count;
+    char      screenshot_status[128];
+
     /* Clock / stopwatch: elapsed time is PIT-tick based and remains valid
      * even if CMOS RTC is unavailable or its timezone basis is changed. */
     uint32_t  stopwatch_elapsed_ticks, stopwatch_started_tick;
-    int       stopwatch_running;
+    int       stopwatch_running, clock_zone_index;
 
     /* Settings */
     int       ext_slot;
@@ -222,6 +251,8 @@ typedef struct {
     /* Calendar follows a validated CMOS RTC date by default; manual navigation
      * pauses following until the user presses T to return to today. */
     int        cal_year, cal_month, cal_follow_today;
+    int        cal_last_date_key;
+    uint32_t   cal_last_probe_tick;
 
     /* TinyGL-Lite scene: 0=cube, 1=gears; both remain software-only. */
     int        tinygl_scene;
@@ -229,7 +260,11 @@ typedef struct {
     /* Native GUI games and tools */
     exp_mines_t mines;
     exp_snake_t snake;
+    exp_flappy_t flappy;
+    exp_tetris_t tetris;
     exp_paint_t paint;
+    int paint_save_count;
+    char paint_status[128];
 } exp_win_t;
 
 /* State */
@@ -245,6 +280,10 @@ typedef struct {
     exp_notif_t notifs[DE_NOTIF_MAX];
     uint32_t   clock_sec;
     uint32_t   last_clock;
+    /* Activity-based screensaver: default timeout is five minutes; motion is
+     * desktop-owned and consumes no framebuffer state from application windows. */
+    uint32_t   last_activity_tick, saver_last_tick;
+    int        saver_active, saver_x, saver_y, saver_dx, saver_dy, saver_color;
     /* Desktop-owned image cache. Decoded once on apply/startup and never
      * shared with Viewer windows, so window close cannot invalidate it. */
     atm_image_t wallpaper_image;

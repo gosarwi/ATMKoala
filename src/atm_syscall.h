@@ -2,7 +2,7 @@
 #define ATM_SYSCALL_H
 
 /*
- * ATMKoala syscall ABI v11.
+ * ATMKoala syscall ABI v22.
  *
  * Register contract: RAX=number, RDI/RSI/RDX/R10/R8/R9=arguments,
  * RAX=result or a negative errno-style value. Native static CPL3 tasks enter
@@ -23,6 +23,17 @@
 #define ATM_SYSCALL_ABI_V9 9u
 #define ATM_SYSCALL_ABI_V10 10u
 #define ATM_SYSCALL_ABI_V11 11u
+#define ATM_SYSCALL_ABI_V12 12u
+#define ATM_SYSCALL_ABI_V13 13u
+#define ATM_SYSCALL_ABI_V14 14u
+#define ATM_SYSCALL_ABI_V15 15u
+#define ATM_SYSCALL_ABI_V16 16u
+#define ATM_SYSCALL_ABI_V17 17u
+#define ATM_SYSCALL_ABI_V18 18u
+#define ATM_SYSCALL_ABI_V19 19u
+#define ATM_SYSCALL_ABI_V20 20u
+#define ATM_SYSCALL_ABI_V21 21u
+#define ATM_SYSCALL_ABI_V22 22u
 
 #define ATM_SYS_READ       0u
 #define ATM_SYS_WRITE      1u
@@ -53,6 +64,7 @@
 #define ATM_SYS_SYMLINK    88u
 #define ATM_SYS_READLINK   89u
 #define ATM_SYS_CHMOD      90u
+#define ATM_SYS_CHOWN      92u
 #define ATM_SYS_UMASK      95u
 #define ATM_SYS_BRK        12u
 #define ATM_SYS_EXECVE     59u
@@ -63,6 +75,10 @@
 #define ATM_SYS_GETPPID    110u
 #define ATM_SYS_GETUID     102u
 #define ATM_SYS_GETGID     104u
+#define ATM_SYS_GETEUID    107u
+#define ATM_SYS_GETEGID    108u
+#define ATM_SYS_GETRESUID  118u
+#define ATM_SYS_GETRESGID  120u
 #define ATM_SYS_GETTID     186u
 #define ATM_SYS_ABI_INFO   0xA700u
 #define ATM_SYS_ISATTY     0xA701u
@@ -87,8 +103,31 @@
 #define ATM_SYS_FSTATAT    0xA716u
 #define ATM_SYS_SEND       0xA717u
 #define ATM_SYS_RECV       0xA718u
+#define ATM_SYS_DUP3       0xA719u
+#define ATM_SYS_PIPE2      0xA71Au
+#define ATM_SYS_GETPGID    0xA71Bu
+#define ATM_SYS_SETPGID    0xA71Cu
+#define ATM_SYS_GETSID     0xA71Du
+#define ATM_SYS_SETSID     0xA71Eu
+#define ATM_SYS_PREADV     0xA71Fu
+#define ATM_SYS_PWRITEV    0xA720u
+#define ATM_SYS_FCHDIR     0xA721u
+#define ATM_SYS_GETRUSAGE   0xA722u
+#define ATM_SYS_MKDIRAT     0xA723u
+#define ATM_SYS_UNLINKAT    0xA724u
+#define ATM_SYS_RENAMEAT    0xA725u
+#define ATM_SYS_LINKAT      0xA726u
+#define ATM_SYS_SYMLINKAT   0xA727u
+#define ATM_SYS_READLINKAT  0xA728u
+#define ATM_SYS_TIMES       0xA729u
+#define ATM_SYS_FCHMOD      0xA72Au
+#define ATM_SYS_FCHOWN      0xA72Bu
+#define ATM_SYS_GETRLIMIT    0xA72Cu
+#define ATM_SYS_FACCESSAT    0xA72Du
 
+#define ATM_EBADF   9
 #define ATM_EFAULT  14
+#define ATM_ENOTDIR 20
 #define ATM_ENOMEM  12
 #define ATM_ENOSYS  38
 #define ATM_EINVAL  22

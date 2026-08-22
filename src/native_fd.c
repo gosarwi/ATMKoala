@@ -1,4 +1,5 @@
 #include "native_fd.h"
+#include "atm_syscall.h"
 #include "util.h"
 #include "vfs.h"
 #include "native_socket.h"
@@ -117,9 +118,16 @@ int native_fd_open(task_t *task,const char *path,uint32_t flags,uint32_t mode){
     return slot;
 }
 
-int native_fd_pipe(task_t *task,int out_fds[2]){
-    int rc=native_pipe_create(task,out_fds);
-    if(rc==0){task->fd_flags[out_fds[0]]=O_RDONLY;task->fd_flags[out_fds[1]]=O_WRONLY;(void)fd_exec_set(task,out_fds[0],0);(void)fd_exec_set(task,out_fds[1],0);}
+int native_fd_pipe(task_t *task,int out_fds[2]){ return native_fd_pipe2(task,out_fds,0); }
+int native_fd_pipe2(task_t *task,int out_fds[2],uint32_t flags){
+    int rc;
+    if(!out_fds||(flags&~(ATM_NATIVE_O_CLOEXEC|ATM_NATIVE_O_NONBLOCK)))return -1;
+    rc=native_pipe_create(task,out_fds);
+    if(rc==0){
+        task->fd_flags[out_fds[0]]=O_RDONLY|(flags&ATM_NATIVE_O_NONBLOCK);
+        task->fd_flags[out_fds[1]]=O_WRONLY|(flags&ATM_NATIVE_O_NONBLOCK);
+        if(fd_exec_set(task,out_fds[0],(flags&ATM_NATIVE_O_CLOEXEC)!=0)<0||fd_exec_set(task,out_fds[1],(flags&ATM_NATIVE_O_CLOEXEC)!=0)<0){(void)native_pipe_close(task,out_fds[0]);(void)native_pipe_close(task,out_fds[1]);return -1;}
+    }
     return rc;
 }
 
@@ -169,6 +177,18 @@ int64_t native_fd_lseek(task_t *task,int fd,int64_t offset,int whence){
     if(native_socket_is_fd(task,fd)) return -1;
     return fd_valid(task,fd)?atm_posix_lseek(task->fd_map[fd],offset,whence):-1;
 }
+int native_fd_fchdir(task_t *task,int fd){
+    if(!task||native_pipe_is_fd(task,fd)||native_socket_is_fd(task,fd)||!fd_valid(task,fd))return -ATM_EBADF;
+    return atm_posix_fchdir(task->fd_map[fd])<0?-ATM_ENOTDIR:0;
+}
+int native_fd_fchmod(task_t *task,int fd,uint32_t mode){
+    if(!task||native_pipe_is_fd(task,fd)||native_socket_is_fd(task,fd)||!fd_valid(task,fd))return -ATM_EBADF;
+    return atm_posix_fchmod(task->fd_map[fd],mode);
+}
+int native_fd_fchown(task_t *task,int fd,uint32_t uid,uint32_t gid){
+    if(!task||native_pipe_is_fd(task,fd)||native_socket_is_fd(task,fd)||!fd_valid(task,fd))return -ATM_EBADF;
+    return atm_posix_fchown(task->fd_map[fd],uid,gid);
+}
 int64_t native_fd_pread(task_t *task,int fd,void *buf,uint64_t count,uint64_t offset){
     if(native_socket_is_fd(task,fd)) return -1;
     return fd_valid(task,fd)?atm_posix_pread(task->fd_map[fd],buf,count,offset):-1;
@@ -176,6 +196,37 @@ int64_t native_fd_pread(task_t *task,int fd,void *buf,uint64_t count,uint64_t of
 int64_t native_fd_pwrite(task_t *task,int fd,const void *buf,uint64_t count,uint64_t offset){
     if(native_socket_is_fd(task,fd)) return -1;
     return fd_valid(task,fd)?atm_posix_pwrite(task->fd_map[fd],buf,count,offset):-1;
+}
+
+/* Positional vector I/O intentionally accepts only regular VFS-backed FDs.
+ * Pipes and sockets have no stable seek position in this bounded runtime. */
+int64_t native_fd_preadv(task_t *task,int fd,const atm_posix_iovec_t *iov,int iovcnt,uint64_t offset){
+    if(!task||!iov||iovcnt<0||iovcnt>16||native_pipe_is_fd(task,fd)||native_socket_is_fd(task,fd)||!fd_valid(task,fd))return -1;
+    int64_t total=0;uint64_t pos=offset;
+    for(int i=0;i<iovcnt;i++){
+        if(iov[i].iov_len&&!iov[i].iov_base)return total?total:-1;
+        if(iov[i].iov_len>UINT64_MAX-pos)return total?total:-1;
+        int64_t n=atm_posix_pread(task->fd_map[fd],iov[i].iov_base,iov[i].iov_len,pos);
+        if(n<0)return total?total:n;
+        total+=n;pos+=(uint64_t)n;
+        if((uint64_t)n<iov[i].iov_len)break;
+    }
+    if(total>0)task->io_read_bytes+=(uint64_t)total;
+    return total;
+}
+int64_t native_fd_pwritev(task_t *task,int fd,const atm_posix_iovec_t *iov,int iovcnt,uint64_t offset){
+    if(!task||!iov||iovcnt<0||iovcnt>16||native_pipe_is_fd(task,fd)||native_socket_is_fd(task,fd)||!fd_valid(task,fd))return -1;
+    int64_t total=0;uint64_t pos=offset;
+    for(int i=0;i<iovcnt;i++){
+        if(iov[i].iov_len&&!iov[i].iov_base)return total?total:-1;
+        if(iov[i].iov_len>UINT64_MAX-pos)return total?total:-1;
+        int64_t n=atm_posix_pwrite(task->fd_map[fd],iov[i].iov_base,iov[i].iov_len,pos);
+        if(n<0)return total?total:n;
+        total+=n;pos+=(uint64_t)n;
+        if((uint64_t)n<iov[i].iov_len)break;
+    }
+    if(total>0)task->io_write_bytes+=(uint64_t)total;
+    return total;
 }
 
 int native_fd_fstat(task_t *task,int fd,atm_posix_stat_t *st){
@@ -208,6 +259,13 @@ int native_fd_dup2(task_t *task,int fd,int newfd){
     int backend=atm_posix_dup(task->fd_map[fd]);if(backend<0)return -1;
     task->fd_map[newfd]=backend;task->fd_flags[newfd]=task->fd_flags[fd];(void)fd_exec_set(task,newfd,0);return newfd;
 }
+int native_fd_dup3(task_t *task,int fd,int newfd,uint32_t flags){
+    if(fd==newfd||(flags&~ATM_NATIVE_O_CLOEXEC))return -1;
+    int out=native_fd_dup2(task,fd,newfd);
+    if(out<0)return out;
+    if(fd_exec_set(task,out,(flags&ATM_NATIVE_O_CLOEXEC)!=0)<0){(void)native_fd_close(task,out);return -1;}
+    return out;
+}
 int native_fd_ftruncate(task_t *task,int fd,uint64_t size){
     if(native_socket_is_fd(task,fd))return -1;
     return fd_valid(task,fd)?atm_posix_ftruncate(task->fd_map[fd],size):-1;
@@ -222,6 +280,7 @@ int native_fd_fcntl(task_t *task,int fd,int cmd,uint32_t arg){
     int is_socket=native_socket_is_fd(task,fd);
     if(!task || !(is_pipe||is_socket||fd_valid(task,fd))) return -1;
     if(cmd==ATM_NATIVE_F_DUPFD) return native_fd_dup_min(task,fd,(int)arg);
+    if(cmd==ATM_NATIVE_F_DUPFD_CLOEXEC){int out=native_fd_dup_min(task,fd,(int)arg);if(out<0||fd_exec_set(task,out,1)<0){if(out>=0)(void)native_fd_close(task,out);return -1;}return out;}
     if(cmd==ATM_NATIVE_F_GETFD) return fd_exec_get(task,fd)?ATM_NATIVE_FD_CLOEXEC:0;
     if(cmd==ATM_NATIVE_F_SETFD){
         if(arg&~ATM_NATIVE_FD_CLOEXEC) return -1;
@@ -239,7 +298,8 @@ int native_fd_poll(task_t *task,atm_native_pollfd_t *fds,uint32_t nfds){
     if(!task || !fds || nfds>ATM_NATIVE_POLL_MAX) return -1;
     int ready=0;
     for(uint32_t i=0;i<nfds;i++){
-        uint16_t revents=native_pipe_is_fd(task,fds[i].fd)?native_pipe_poll(task,fds[i].fd,fds[i].events):ATM_POLLNVAL;
+        uint16_t revents=native_pipe_is_fd(task,fds[i].fd)?native_pipe_poll(task,fds[i].fd,fds[i].events):
+                         (native_socket_is_fd(task,fds[i].fd)?native_socket_poll(task,fds[i].fd,fds[i].events):ATM_POLLNVAL);
         fds[i].revents=revents;
         if(revents) ready++;
     }
@@ -247,7 +307,7 @@ int native_fd_poll(task_t *task,atm_native_pollfd_t *fds,uint32_t nfds){
 }
 
 int native_fd_selftest(void){
-    task_t test;
+    static task_t test;
     kmemset(&test,0,sizeof(test));
     native_fd_task_init(&test);
     if(!fd_valid(&test,0)||!fd_valid(&test,1)||!fd_valid(&test,2)||fd_valid(&test,3)){native_fd_task_cleanup(&test);return -1;}
@@ -266,14 +326,16 @@ int native_fd_selftest(void){
     if(native_fd_poll(&test,&pollfd,1)!=1 || pollfd.revents!=ATM_POLLOUT) return -1;
     int copy=native_fd_dup(&test,pipefd[0]);
     int fdup=native_fd_fcntl(&test,pipefd[0],ATM_NATIVE_F_DUPFD,12);
-    if(copy<0 || fdup!=12 || native_fd_close(&test,fdup)<0 ||
+    int cloexec_dup=native_fd_fcntl(&test,pipefd[1],ATM_NATIVE_F_DUPFD_CLOEXEC,13);
+    if(copy<0 || fdup!=12 || cloexec_dup!=13 || native_fd_fcntl(&test,cloexec_dup,ATM_NATIVE_F_GETFD,0)!=ATM_NATIVE_FD_CLOEXEC || native_fd_dup3(&test,pipefd[1],14,ATM_NATIVE_O_CLOEXEC)!=14 || native_fd_fcntl(&test,14,ATM_NATIVE_F_GETFD,0)!=ATM_NATIVE_FD_CLOEXEC || native_fd_dup3(&test,pipefd[1],pipefd[1],0)>=0 || native_fd_close(&test,fdup)<0 ||
        native_fd_fcntl(&test,pipefd[0],ATM_NATIVE_F_GETFD,0)!=0 ||
        native_fd_fcntl(&test,pipefd[0],ATM_NATIVE_F_SETFD,ATM_NATIVE_FD_CLOEXEC)<0 ||
        native_fd_fcntl(&test,pipefd[0],ATM_NATIVE_F_GETFD,0)!=ATM_NATIVE_FD_CLOEXEC ||
        native_fd_fcntl(&test,copy,ATM_NATIVE_F_GETFD,0)!=0 ||
        native_fd_fcntl(&test,copy,ATM_NATIVE_F_GETFL,0)!=(int)(O_RDONLY|ATM_NATIVE_O_NONBLOCK)) return -1;
     native_fd_close_on_exec(&test);
-    if(native_pipe_is_fd(&test,pipefd[0]) || native_fd_close(&test,copy)<0 || native_fd_close(&test,pipefd[1])<0) return -1;
+    if(native_pipe_is_fd(&test,pipefd[0]) || native_pipe_is_fd(&test,cloexec_dup) || native_pipe_is_fd(&test,14) || native_fd_close(&test,copy)<0 || native_fd_close(&test,pipefd[1])<0) return -1;
+    if(native_fd_pipe2(&test,pipefd,ATM_NATIVE_O_CLOEXEC|ATM_NATIVE_O_NONBLOCK)<0 || native_fd_fcntl(&test,pipefd[0],ATM_NATIVE_F_GETFD,0)!=ATM_NATIVE_FD_CLOEXEC || native_fd_fcntl(&test,pipefd[0],ATM_NATIVE_F_GETFL,0)!=(int)(O_RDONLY|ATM_NATIVE_O_NONBLOCK) || native_fd_close(&test,pipefd[0])<0 || native_fd_close(&test,pipefd[1])<0 || native_fd_pipe2(&test,pipefd,1u)>=0) return -1;
     native_fd_task_cleanup(&test);
     (void)atm_posix_unlink("/tmp/.atm-native-fd-test");
     return 0;

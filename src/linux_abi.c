@@ -24,19 +24,49 @@
 #define LINUX_NR_OPEN       2u
 #define LINUX_NR_CLOSE      3u
 #define LINUX_NR_GETPID     39u
+#define LINUX_NR_EXECVE     59u
 #define LINUX_NR_EXIT       60u
 #define LINUX_NR_EXIT_GROUP 231u
+#define LINUX_NR_KILL       62u
+#define LINUX_NR_FCHDIR     81u
 #define LINUX_NR_MMAP       9u
 #define LINUX_NR_MPROTECT   10u
 #define LINUX_NR_MUNMAP     11u
 #define LINUX_NR_BRK        12u
 #define LINUX_NR_UNAME      63u
+#define LINUX_NR_FCHMOD     91u
+#define LINUX_NR_CHOWN      92u
+#define LINUX_NR_FCHOWN     93u
+#define LINUX_NR_GETRLIMIT   97u
+#define LINUX_NR_GETRUSAGE  98u
+#define LINUX_NR_TIMES      100u
+#define LINUX_NR_MKDIRAT    258u
+#define LINUX_NR_UNLINKAT   263u
+#define LINUX_NR_RENAMEAT   264u
+#define LINUX_NR_LINKAT     265u
+#define LINUX_NR_SYMLINKAT  266u
+#define LINUX_NR_READLINKAT 267u
+#define LINUX_NR_FACCESSAT  269u
+#define LINUX_NR_GETUID     102u
+#define LINUX_NR_GETGID     104u
+#define LINUX_NR_GETEUID    107u
+#define LINUX_NR_GETEGID    108u
+#define LINUX_NR_SETPGID    109u
+#define LINUX_NR_SETSID     112u
+#define LINUX_NR_GETRESUID  118u
+#define LINUX_NR_GETRESGID  120u
+#define LINUX_NR_GETPGID    121u
+#define LINUX_NR_GETSID     124u
 #define LINUX_NR_ARCH_PRCTL 158u
 #define LINUX_NR_GETTID     186u
 #define LINUX_NR_SET_TID_ADDRESS 218u
 #define LINUX_NR_GETDENTS64 217u
 #define LINUX_NR_OPENAT 257u
 #define LINUX_NR_NEWFSTATAT 262u
+#define LINUX_NR_DUP3 292u
+#define LINUX_NR_PIPE2 293u
+#define LINUX_NR_PREADV 295u
+#define LINUX_NR_PWRITEV 296u
 
 #define LINUX_ARCH_SET_FS   0x1002u
 #define LINUX_ARCH_GET_FS   0x1003u
@@ -182,6 +212,13 @@ static int linux_open_flags(uint64_t in,uint32_t *out){
     if(in&LINUX_O_CLOEXEC)f|=ATM_NATIVE_O_CLOEXEC;
     *out=f;return 0;
 }
+static int linux_descriptor_flags(uint64_t in,uint32_t *out){
+    uint32_t f=0;
+    if(!out||(in&~(LINUX_O_CLOEXEC|LINUX_O_NONBLOCK)))return -1;
+    if(in&LINUX_O_CLOEXEC)f|=ATM_NATIVE_O_CLOEXEC;
+    if(in&LINUX_O_NONBLOCK)f|=ATM_NATIVE_O_NONBLOCK;
+    *out=f;return 0;
+}
 static uint64_t linux_openat(registers_t *r,int has_dirfd){
     task_t *task=sched_current();user_space_t *space=task?(user_space_t *)task->address_space:NULL;
     char path[VFS_PATH_MAX];uint32_t flags;
@@ -311,10 +348,72 @@ uint64_t linux_syscall_dispatch(registers_t *r){
         return linux_munmap_anon(r);
     case LINUX_NR_BRK:
         return atm_syscall_dispatch(r);
+    case LINUX_NR_DUP3: {
+        uint32_t flags;
+        if(linux_descriptor_flags(r->rdx,&flags)<0 || (flags&ATM_NATIVE_O_NONBLOCK))return linux_error(ATM_EINVAL);
+        r->rdx=flags;r->rax=ATM_SYS_DUP3;
+        return atm_syscall_dispatch(r);
+    }
+    case LINUX_NR_PIPE2: {
+        uint32_t flags;
+        if(linux_descriptor_flags(r->rsi,&flags)<0)return linux_error(ATM_EINVAL);
+        r->rsi=flags;r->rax=ATM_SYS_PIPE2;
+        return atm_syscall_dispatch(r);
+    }
+    case LINUX_NR_PREADV:
+        r->r10=((r->r8&0xffffffffULL)<<32)|(r->r10&0xffffffffULL);
+        r->rax=ATM_SYS_PREADV;return atm_syscall_dispatch(r);
+    case LINUX_NR_PWRITEV:
+        r->r10=((r->r8&0xffffffffULL)<<32)|(r->r10&0xffffffffULL);
+        r->rax=ATM_SYS_PWRITEV;return atm_syscall_dispatch(r);
+    case LINUX_NR_GETPGID:
+        r->rax=ATM_SYS_GETPGID;return atm_syscall_dispatch(r);
+    case LINUX_NR_SETPGID:
+        r->rax=ATM_SYS_SETPGID;return atm_syscall_dispatch(r);
+    case LINUX_NR_GETSID:
+        r->rax=ATM_SYS_GETSID;return atm_syscall_dispatch(r);
+    case LINUX_NR_FCHDIR:
+        r->rax=ATM_SYS_FCHDIR;return atm_syscall_dispatch(r);
+    case LINUX_NR_CHOWN:
+        r->rax=ATM_SYS_CHOWN;return atm_syscall_dispatch(r);
+    case LINUX_NR_FCHMOD:
+        r->rax=ATM_SYS_FCHMOD;return atm_syscall_dispatch(r);
+    case LINUX_NR_FCHOWN:
+        r->rax=ATM_SYS_FCHOWN;return atm_syscall_dispatch(r);
+    case LINUX_NR_GETRUSAGE:
+        r->rax=ATM_SYS_GETRUSAGE;return atm_syscall_dispatch(r);
+    case LINUX_NR_GETRLIMIT:
+        r->rax=ATM_SYS_GETRLIMIT;return atm_syscall_dispatch(r);
+    case LINUX_NR_TIMES:
+        r->rax=ATM_SYS_TIMES;return atm_syscall_dispatch(r);
+    case LINUX_NR_MKDIRAT:
+        r->rax=ATM_SYS_MKDIRAT;return atm_syscall_dispatch(r);
+    case LINUX_NR_UNLINKAT:
+        r->rax=ATM_SYS_UNLINKAT;return atm_syscall_dispatch(r);
+    case LINUX_NR_RENAMEAT:
+        r->rax=ATM_SYS_RENAMEAT;return atm_syscall_dispatch(r);
+    case LINUX_NR_LINKAT:
+        r->rax=ATM_SYS_LINKAT;return atm_syscall_dispatch(r);
+    case LINUX_NR_SYMLINKAT:
+        r->rax=ATM_SYS_SYMLINKAT;return atm_syscall_dispatch(r);
+    case LINUX_NR_READLINKAT:
+        r->rax=ATM_SYS_READLINKAT;return atm_syscall_dispatch(r);
+    case LINUX_NR_FACCESSAT:
+        r->r10=0;r->rax=ATM_SYS_FACCESSAT;return atm_syscall_dispatch(r);
+    case LINUX_NR_SETSID:
+        r->rax=ATM_SYS_SETSID;return atm_syscall_dispatch(r);
     case LINUX_NR_READ:
     case LINUX_NR_WRITE:
     case LINUX_NR_CLOSE:
     case LINUX_NR_GETPID:
+    case LINUX_NR_KILL:
+    case LINUX_NR_GETUID:
+    case LINUX_NR_GETGID:
+    case LINUX_NR_GETEUID:
+    case LINUX_NR_GETEGID:
+    case LINUX_NR_GETRESUID:
+    case LINUX_NR_GETRESGID:
+    case LINUX_NR_EXECVE:
     case LINUX_NR_EXIT:
         return atm_syscall_dispatch(r);
     case LINUX_NR_EXIT_GROUP:

@@ -9,6 +9,19 @@
 #define ATM_LLONG_MIN  (-ATM_LLONG_MAX-1LL)
 
 void exit(int status){ _exit(status); }
+char *getenv(const char *name){
+    size_t n=0;
+    if(!name||!name[0])return 0;
+    while(name[n]&&name[n]!='=')n++;
+    if(!n||name[n])return 0;
+    if(!environ)return 0;
+    for(char **entry=environ;*entry;entry++){
+        size_t i=0;while(i<n&&(*entry)[i]==name[i])i++;
+        if(i==n&&(*entry)[i]=='=')return *entry+n+1;
+    }
+    return 0;
+}
+
 int abs(int value){ return value<0?-value:value; }
 long labs(long value){ return value<0?-value:value; }
 long long llabs(long long value){ return value<0?-value:value; }

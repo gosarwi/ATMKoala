@@ -2,8 +2,14 @@
 #include "rtc.h"
 #include "pit.h"
 #include "atm_syscall.h"
+#include "tzif.h"
 #include "util.h"
 #include <stdint.h>
+
+/* A manually applied network correction is intentionally volatile. The CMOS
+ * clock remains a firmware-owned source unless a future explicit writeback path
+ * is implemented and separately verified. */
+static int64_t realtime_correction_seconds;
 
 static int leap_year(int year){
     return (year%4==0 && year%100!=0) || year%400==0;
@@ -60,12 +66,20 @@ static int timezone_dst(const tz_entry_t *z,const rtc_datetime_t *utc){
 static void seconds_to_civil(int64_t seconds,rtc_datetime_t *out){int64_t days=seconds/86400LL,rem=seconds%86400LL;if(rem<0){rem+=86400LL;days--;}int year=1970;while(days>=(leap_year(year)?366:365)){days-=leap_year(year)?366:365;year++;}int month=1;while(days>=month_days(year,month)){days-=month_days(year,month);month++;}out->year=year;out->month=month;out->day=(int)days+1;out->hour=(int)(rem/3600LL);out->minute=(int)((rem/60LL)%60LL);out->second=(int)(rem%60LL);}
 
 int atm_timezone_supported(const char *zone){return tz_find(zone)!=NULL;}
+uint32_t atm_timezone_count(void){return (uint32_t)(sizeof(tz_table)/sizeof(tz_table[0]));}
+const char *atm_timezone_name(uint32_t index){return index<atm_timezone_count()?tz_table[index].name:NULL;}
 int atm_timezone_convert(const char *zone,const rtc_datetime_t *utc,rtc_datetime_t *local,int *offset_minutes,int *dst_active){
+    if(tzif_is_loaded(zone))return tzif_convert(zone,utc,local,offset_minutes,dst_active);
     if(!valid_civil(utc)||!local)return -ATM_EINVAL;const tz_entry_t *z=tz_find(zone);if(!z)return -ATM_ENOSYS;int dst=timezone_dst(z,utc),offset=dst?z->dst_minutes:z->standard_minutes;seconds_to_civil(rtc_unix_seconds(utc)+(int64_t)offset*60LL,local);if(offset_minutes)*offset_minutes=offset;if(dst_active)*dst_active=dst;return 0;
 }
-int atm_local_datetime(const char *zone,rtc_datetime_t *local,int *offset_minutes,int *dst_active){rtc_datetime_t utc;if(rtc_read_datetime(&utc)<0)return -ATM_ENOSYS;return atm_timezone_convert(zone,&utc,local,offset_minutes,dst_active);}
+int atm_realtime_utc(rtc_datetime_t *out){rtc_datetime_t raw;if(!out||rtc_read_datetime(&raw)<0)return -ATM_ENOSYS;int64_t corrected=rtc_unix_seconds(&raw)+realtime_correction_seconds;seconds_to_civil(corrected,out);return valid_civil(out)?0:-ATM_EINVAL;}
+int atm_realtime_set_unix(int64_t unix_seconds){rtc_datetime_t target,raw;seconds_to_civil(unix_seconds,&target);if(!valid_civil(&target)||rtc_read_datetime(&raw)<0)return -ATM_EINVAL;realtime_correction_seconds=unix_seconds-rtc_unix_seconds(&raw);return 0;}
+int atm_realtime_correction_seconds(int64_t *out){if(!out)return -ATM_EINVAL;*out=realtime_correction_seconds;return 0;}
+void atm_realtime_clear_correction(void){realtime_correction_seconds=0;}
+int atm_local_datetime(const char *zone,rtc_datetime_t *local,int *offset_minutes,int *dst_active){rtc_datetime_t utc;if(atm_realtime_utc(&utc)<0)return -ATM_ENOSYS;return atm_timezone_convert(zone,&utc,local,offset_minutes,dst_active);}
 int atm_timezone_selftest(void){
     rtc_datetime_t utc,local;int off,dst;
+    if(atm_timezone_count()<100u||!atm_timezone_name(0)||kstrcmp(atm_timezone_name(0),"UTC")||atm_timezone_name(atm_timezone_count())!=NULL)return -1;
     utc=(rtc_datetime_t){2026,1,15,12,0,0};if(atm_timezone_convert("Asia/Yekaterinburg",&utc,&local,&off,&dst)<0||off!=300||dst||local.hour!=17||local.day!=15)return -1;
     if(atm_timezone_convert("America/New_York",&utc,&local,&off,&dst)<0||off!=-300||dst||local.hour!=7)return -1;
     utc=(rtc_datetime_t){2026,7,1,12,0,0};if(atm_timezone_convert("America/New_York",&utc,&local,&off,&dst)<0||off!=-240||!dst||local.hour!=8)return -1;
@@ -86,7 +100,7 @@ int atm_clock_gettime(int clock_id,atm_timespec_t *out){
     }
     if(clock_id!=ATM_CLOCK_REALTIME) return -ATM_EINVAL;
     rtc_datetime_t rtc;
-    if(rtc_read_datetime(&rtc)<0) return -ATM_ENOSYS;
+    if(atm_realtime_utc(&rtc)<0) return -ATM_ENOSYS;
     out->tv_sec=rtc_unix_seconds(&rtc);
     out->tv_nsec=(int64_t)(ticks%100u)*10000000LL;
     return 0;

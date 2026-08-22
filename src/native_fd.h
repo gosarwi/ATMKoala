@@ -13,6 +13,7 @@
 #define ATM_NATIVE_F_SETFD    2
 #define ATM_NATIVE_F_GETFL    3
 #define ATM_NATIVE_F_SETFL    4
+#define ATM_NATIVE_F_DUPFD_CLOEXEC 1030
 #define ATM_NATIVE_FD_CLOEXEC 1u
 #define ATM_NATIVE_POLL_MAX   16
 
@@ -31,23 +32,31 @@ void    native_fd_close_on_exec(task_t *task);
 int     native_fd_task_inherit(task_t *child,const task_t *parent);
 int     native_fd_open(task_t *task, const char *path, uint32_t flags, uint32_t mode);
 int     native_fd_pipe(task_t *task, int out_fds[2]);
+int     native_fd_pipe2(task_t *task, int out_fds[2],uint32_t flags);
 int     native_fd_close(task_t *task, int fd);
 int64_t native_fd_read(task_t *task, int fd, void *buf, uint64_t count);
 int64_t native_fd_write(task_t *task, int fd, const void *buf, uint64_t count);
 int64_t native_fd_readv(task_t *task, int fd, const atm_posix_iovec_t *iov, int iovcnt);
 int64_t native_fd_writev(task_t *task, int fd, const atm_posix_iovec_t *iov, int iovcnt);
 int64_t native_fd_lseek(task_t *task, int fd, int64_t offset, int whence);
+/* Changes task-local CWD through an owned VFS-backed directory descriptor. */
+int     native_fd_fchdir(task_t *task,int fd);
+int     native_fd_fchmod(task_t *task,int fd,uint32_t mode);
+int     native_fd_fchown(task_t *task,int fd,uint32_t uid,uint32_t gid);
 int64_t native_fd_pread(task_t *task, int fd, void *buf, uint64_t count, uint64_t offset);
 int64_t native_fd_pwrite(task_t *task, int fd, const void *buf, uint64_t count, uint64_t offset);
+int64_t native_fd_preadv(task_t *task, int fd, const atm_posix_iovec_t *iov, int iovcnt, uint64_t offset);
+int64_t native_fd_pwritev(task_t *task, int fd, const atm_posix_iovec_t *iov, int iovcnt, uint64_t offset);
 int     native_fd_fstat(task_t *task, int fd, atm_posix_stat_t *st);
 /* Reads one VFS directory entry through an owned native descriptor. */
 int     native_fd_readdir(task_t *task,int fd,atm_posix_dirent_t *out);
 int     native_fd_dup(task_t *task, int fd);
 int     native_fd_dup2(task_t *task, int fd, int newfd);
+int     native_fd_dup3(task_t *task, int fd, int newfd,uint32_t flags);
 int     native_fd_ftruncate(task_t *task, int fd, uint64_t size);
 int     native_fd_fsync(task_t *task, int fd, int data_only);
 int     native_fd_isatty(task_t *task, int fd);
-/* Bounded fcntl subset: F_DUPFD, F_GETFD/F_SETFD and F_GETFL/F_SETFL.
+/* Bounded fcntl subset: F_DUPFD/F_DUPFD_CLOEXEC, F_GETFD/F_SETFD and F_GETFL/F_SETFL.
  * FD_CLOEXEC is a descriptor flag; only O_NONBLOCK is mutable among status
  * flags, while access mode is captured at descriptor creation. */
 int     native_fd_fcntl(task_t *task,int fd,int cmd,uint32_t arg);

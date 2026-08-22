@@ -66,8 +66,19 @@ static inline uint64_t cpu_cr0(void){ uint64_t v; __asm__ volatile("mov %%cr0,%0
 static inline uint64_t cpu_cr2(void){ uint64_t v; __asm__ volatile("mov %%cr2,%0":"=r"(v)); return v; }
 static inline uint64_t cpu_cr3(void){ uint64_t v; __asm__ volatile("mov %%cr3,%0":"=r"(v)); return v; }
 
-/* Kernel printf — implemented in util.c, prints via terminal */
+/* Kernel printf — implemented in util.c, prints via terminal. Each formatted
+ * kernel message is also retained in a bounded chronological in-memory ring so
+ * init can show boot/runtime diagnostics even before writable storage exists. */
+#define ATM_KERNEL_LOG_MAX 128u
+#define ATM_KERNEL_LOG_TEXT_MAX 160u
+typedef struct {
+    uint32_t sequence;
+    char text[ATM_KERNEL_LOG_TEXT_MAX];
+} atm_kernel_log_entry_t;
 void kprintf(const char *fmt, ...);
+int kernel_log_count(void);
+const atm_kernel_log_entry_t *kernel_log_at(int index); /* oldest first */
+
 
 /* Panic */
 __attribute__((noreturn)) void kpanic(const char *msg);

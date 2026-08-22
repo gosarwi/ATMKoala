@@ -130,6 +130,8 @@ void sched_init(void) {
     /* Create idle task (pid=0, runs when nothing else is ready) */
     task_t *idle = &task_pool[0];
     idle->pid      = 0;
+    idle->pgid     = 0;
+    idle->sid      = 0;
     idle->uid      = vfs_current_uid();
     idle->gid      = vfs_current_gid();
     kstrcpy(idle->cwd,"/");
@@ -156,6 +158,8 @@ task_t *task_create(const char *name, task_fn_t fn, uint32_t priority) {
 
     t->pid        = next_pid++;
     t->ppid        = current_task ? current_task->pid : 0;
+    if(current_task && current_task->pid){t->pgid=current_task->pgid;t->sid=current_task->sid;}
+    else {t->pgid=t->pid;t->sid=t->pid;}
     t->uid         = current_task?current_task->uid:vfs_current_uid();
     t->gid         = current_task?current_task->gid:vfs_current_gid();
     if(current_task){kstrcpy(t->cwd,current_task->cwd);t->umask_value=current_task->umask_value;}
@@ -371,20 +375,54 @@ int task_waitpid(int32_t pid,int *status,uint32_t options) {
     }
 }
 
-int task_send_signal(uint32_t pid,int sig) {
-    if(pid==0 || (sig!=15 && sig!=9)) return -1;
-    for(int i=0;i<TASK_MAX;i++){
-        task_t *t=&task_pool[i];
-        if(t->state==TASK_UNUSED || t->pid!=pid) continue;
-        t->pending_signal=(uint32_t)sig;
-        if(t!=current_task){
-            __asm__ volatile("cli");
-            task_mark_zombie(t,0,(uint32_t)sig);
-            __asm__ volatile("sti");
-        }
-        return 0;
+static task_t *task_visible_target(task_t *caller,int32_t pid){
+    if(!caller)return NULL;
+    if(pid==0)return caller;
+    if(pid<0)return NULL;
+    task_t *target=task_lookup_pid((uint32_t)pid);
+    if(!target || (target!=caller && target->ppid!=caller->pid))return NULL;
+    return target;
+}
+int task_getpgid(int32_t pid){task_t *t=task_visible_target(current_task,pid);return t?(int)t->pgid:-1;}
+int task_getsid(int32_t pid){task_t *t=task_visible_target(current_task,pid);return t?(int)t->sid:-1;}
+int task_setpgid(int32_t pid,int32_t pgid){
+    task_t *caller=current_task,*target=task_visible_target(caller,pid);
+    if(!caller||!target||pgid<0||target->state==TASK_ZOMBIE)return -1;
+    uint32_t newpgid=pgid?(uint32_t)pgid:target->pid;
+    if(newpgid!=target->pid){
+        task_t *leader=task_lookup_pid(newpgid);
+        if(!leader||leader->sid!=target->sid)return -1;
     }
-    return -1;
+    target->pgid=newpgid;return 0;
+}
+int task_setsid(void){
+    task_t *t=current_task;
+    if(!t||!t->pid||t->pgid==t->pid)return -1;
+    t->sid=t->pid;t->pgid=t->pid;return (int)t->sid;
+}
+
+int task_signal_probe(int32_t pid){
+    task_t *caller=current_task;
+    if(!caller || pid<=0) return -TASK_ERR_EINVAL;
+    task_t *target=task_lookup_pid((uint32_t)pid);
+    if(!target || target->state==TASK_UNUSED || target->state==TASK_ZOMBIE) return -3; /* ESRCH */
+    return (target==caller || target->ppid==caller->pid)?0:-1; /* EPERM */
+}
+
+int task_send_signal(int32_t pid,int sig) {
+    if(sig==0) return task_signal_probe(pid);
+    if(pid<=0 || (sig!=15 && sig!=9)) return -TASK_ERR_EINVAL;
+    task_t *caller=current_task;
+    task_t *target=task_lookup_pid((uint32_t)pid);
+    if(!caller || !target || target->state==TASK_UNUSED || target->state==TASK_ZOMBIE) return -3; /* ESRCH */
+    /* Signal delivery into the active self context would require a checked
+     * user-frame delivery/return contract. Do not falsely acknowledge it. */
+    if(target==caller || target->ppid!=caller->pid) return -1; /* EPERM */
+    target->pending_signal=(uint32_t)sig;
+    __asm__ volatile("cli");
+    task_mark_zombie(target,0,(uint32_t)sig);
+    __asm__ volatile("sti");
+    return 0;
 }
 
 /* ── task_yield ────────────────────────────────────────────── */
@@ -521,7 +559,7 @@ uint64_t sched_busy_ticks(void){return uptime_ticks>=idle_ticks?(uint64_t)(uptim
 int sched_task_info(uint32_t slot,sched_task_info_t *out){
     if(!out || slot>=TASK_MAX || task_pool[slot].state==TASK_UNUSED) return -1;
     task_t *t=&task_pool[slot];kmemset(out,0,sizeof(*out));
-    out->pid=t->pid;out->ppid=t->ppid;out->uid=t->uid;out->gid=t->gid;out->state=t->state;out->priority=t->priority;out->context_switches=t->context_switches;
+    out->pid=t->pid;out->ppid=t->ppid;out->pgid=t->pgid;out->sid=t->sid;out->uid=t->uid;out->gid=t->gid;out->state=t->state;out->priority=t->priority;out->context_switches=t->context_switches;
     out->cpu_ticks=t->ticks;out->created_ticks=t->created_ticks;out->state_changed_ticks=t->state_changed_ticks;out->resident_bytes=t->resident_bytes;out->io_read_bytes=t->io_read_bytes;out->io_write_bytes=t->io_write_bytes;kstrcpy(out->name,t->name);return 0;
 }
 

@@ -22,7 +22,8 @@ ASFLAGS = --64
 LDFLAGS = -m elf_x86_64 -z max-page-size=0x1000
 
 KERNEL  = build/kernel.bin
-# Limine is the sole primary ISO boot path.
+# ATM Loader hybrid ISO is the primary boot distribution; its BIOS and UEFI
+# branches are provided by the vendored Limine binaries under BSD-2-Clause.
 ISO     = atmkoala-OS-v0.9-limine.iso
 LIMINE_DIR = third_party/limine/bin
 LIMINE_TOOL = $(LIMINE_DIR)/limine
@@ -30,11 +31,13 @@ LIMINE_ROOT = build/limine-iso
 LIMINE_CONF = boot/limine/limine.conf
 LIMINE_UEFI_CONF = boot/limine/limine-uefi.conf
 LIMINE_UEFI_CD = build/limine-uefi-cd.bin
+ATMLOADER_CONTRACT = boot/atmloader/MENU_CONTRACT.md
 ATMBOOT_IMG = atmkoala-atmboot.img
 ATMBOOT_STAGE0 = build/atmboot-stage0.bin
 ATMBOOT_STAGE2 = build/atmboot-stage2.bin
 ATMBOOT_STAGE2_PAD = build/atmboot-stage2-pad.bin
 ATMBOOT_KERNEL = build/atmboot-kernel.raw
+ATMBOOT_KERNEL_SECTORS = 1536
 ATMUEFI_IMG = atmkoala-atmuefi.img
 ATMUEFI_DIR = build/atmuefi
 ATMUEFI_EFI = $(ATMUEFI_DIR)/BOOTX64.EFI
@@ -47,7 +50,7 @@ LIBC_SMOKE_BLOB = build/libc_smoke_blob.o
 
 OBJS = build/boot.o        $(LIBC_SMOKE_BLOB) build/gdt.o        build/idt.o       build/pit.o     \
        build/kmalloc.o     build/vga.o        build/vbe.o       build/keyboard.o build/mouse.o build/rtc.o \
-       build/util.o        build/atm_time.o build/atm_uname.o build/paging.o     build/uaccess.o    build/usermode.o  build/linux_abi.o build/native_fd.o build/native_pipe.o build/native_dir.o build/native_socket.o build/native_app.o build/vfs.o        build/sched.o     build/elf.o     \
+       build/util.o        build/atm_time.o build/ntp.o build/tzif.o build/atm_uname.o build/paging.o     build/uaccess.o    build/usermode.o  build/linux_abi.o build/native_fd.o build/native_pipe.o build/native_dir.o build/native_socket.o build/native_app.o build/vfs.o        build/sched.o     build/elf.o     \
        build/net.o         build/net_tcp.o     build/disk.o       build/catfs.o      build/catfs_vfs.o \
        build/config.o      build/locale.o      build/users.o      build/atminit.o build/atm_posix.o build/atm_syscall.o \
        build/partmgr.o     build/diskmgr.o    build/bsd_compat.o build/vga_modeset.o \
@@ -61,7 +64,7 @@ OBJS = build/boot.o        $(LIBC_SMOKE_BLOB) build/gdt.o        build/idt.o    
        build/unm.o         build/untui.o                                        \
        build/kernel.o
 
-.PHONY: all iso limine limine-iso atmboot atmuefi clean run run-vbe run-limine run-atmboot run-atmuefi
+.PHONY: all iso limine limine-iso atmloader legacy-bootloaders atmboot atmuefi clean run run-vbe run-limine run-atmboot run-atmuefi
 
 all: $(KERNEL)
 
@@ -69,8 +72,18 @@ $(KERNEL): $(OBJS) linker.ld | build
 	$(LD) $(LDFLAGS) -T linker.ld $(OBJS) -o $@
 	@echo "[+] atmkoala x64: $@ ($$(wc -c < $@) bytes)"
 
-# Canonical ISO target: Limine is the only primary bootloader.
+# Canonical hybrid ISO target for the unified ATM Loader project.
 iso: limine-iso
+
+# Limine-only development target: the hybrid ISO is the sole supported
+# feature-development and release artifact. ATMBOOT/ATMUEFI are preserved
+# as archived legacy targets and are intentionally excluded here.
+atmloader: limine-iso
+	@echo "[+] ATM Loader (Limine-only): $(ISO)"
+
+# Manual archive build only; do not use this target for new platform features.
+legacy-bootloaders: atmboot atmuefi
+	@echo "[+] Archived legacy artifacts: $(ATMBOOT_IMG), $(ATMUEFI_IMG)"
 
 # Limine BIOS+UEFI hybrid ISO. The existing kernel keeps its Multiboot2
 # entry and receives the same MB2 magic/info contract under the new loader.
@@ -91,7 +104,7 @@ $(LIMINE_UEFI_CD): $(KERNEL) $(LIMINE_UEFI_CONF) $(LIMINE_DIR)/BOOTX64.EFI | bui
 	mcopy -i $@ $(KERNEL) ::/kernel.bin
 	mcopy -i $@ $(LIMINE_UEFI_CONF) ::/limine.conf
 
-limine-iso: $(KERNEL) $(LIMINE_TOOL) $(LIMINE_UEFI_CD) $(LIMINE_CONF) $(LIMINE_DIR)/limine-bios-cd.bin $(LIMINE_DIR)/limine-bios.sys $(LIMINE_DIR)/BOOTX64.EFI
+limine-iso: $(KERNEL) $(LIMINE_TOOL) $(LIMINE_UEFI_CD) $(LIMINE_CONF) $(ATMLOADER_CONTRACT) $(LIMINE_DIR)/limine-bios-cd.bin $(LIMINE_DIR)/limine-bios.sys $(LIMINE_DIR)/BOOTX64.EFI
 	@echo "[*] Building Limine hybrid ISO: $(ISO)"
 	rm -rf $(LIMINE_ROOT) $(ISO)
 	mkdir -p $(LIMINE_ROOT)/boot $(LIMINE_ROOT)/EFI/BOOT
@@ -109,8 +122,9 @@ limine-iso: $(KERNEL) $(LIMINE_TOOL) $(LIMINE_UEFI_CD) $(LIMINE_CONF) $(LIMINE_D
 	$(LIMINE_TOOL) bios-install $(ISO)
 	@echo "[+] Limine ISO ready: $(ISO) ($$(du -sh $(ISO) | cut -f1))"
 
-# ATMBOOT is a frozen, separate BIOS/IDE raw image (stage0 -> stage2 -> raw kernel).
-atmboot: $(KERNEL) | build
+# Archived ATMBOOT BIOS/IDE image (stage0 -> stage2 -> raw kernel).
+# Retained for historical/recovery inspection; no new feature work targets it.
+atmboot: $(KERNEL) $(ATMLOADER_CONTRACT) | build
 	$(AS) --32 boot/atmboot/stage0.s -o build/atmboot-stage0.o
 	$(LD) -m elf_i386 -Ttext 0x7C00 --oformat binary build/atmboot-stage0.o -o $(ATMBOOT_STAGE0)
 	@test $$(wc -c < $(ATMBOOT_STAGE0)) -eq 512 || (echo "ERROR: ATMBOOT stage0 must be 512 bytes" && exit 1)
@@ -119,17 +133,17 @@ atmboot: $(KERNEL) | build
 	@test $$(wc -c < $(ATMBOOT_STAGE2)) -le 32768 || (echo "ERROR: ATMBOOT stage2 exceeds 64 sectors" && exit 1)
 	dd if=/dev/zero of=$(ATMBOOT_STAGE2_PAD) bs=512 count=64 status=none
 	dd if=$(ATMBOOT_STAGE2) of=$(ATMBOOT_STAGE2_PAD) conv=notrunc status=none
-	@sectors=$$((($$(wc -c < $(KERNEL))+511)/512)); test $$sectors -le 1024 || (echo "ERROR: kernel exceeds ATMBOOT 1024-sector payload" && exit 1)
+	@sectors=$$((($$(wc -c < $(KERNEL))+511)/512)); test $$sectors -le $(ATMBOOT_KERNEL_SECTORS) || (echo "ERROR: kernel exceeds ATMBOOT $(ATMBOOT_KERNEL_SECTORS)-sector payload" && exit 1)
 	$(OBJCOPY) -O binary $(KERNEL) build/atmboot-kernel-flat.bin
-	@sectors=$$((($$(wc -c < build/atmboot-kernel-flat.bin)+511)/512)); test $$sectors -le 1024 || (echo "ERROR: flat kernel exceeds ATMBOOT 1024-sector payload" && exit 1)
-	dd if=/dev/zero of=$(ATMBOOT_KERNEL) bs=512 count=1024 status=none
+	@sectors=$$((($$(wc -c < build/atmboot-kernel-flat.bin)+511)/512)); test $$sectors -le $(ATMBOOT_KERNEL_SECTORS) || (echo "ERROR: flat kernel exceeds ATMBOOT $(ATMBOOT_KERNEL_SECTORS)-sector payload" && exit 1)
+	dd if=/dev/zero of=$(ATMBOOT_KERNEL) bs=512 count=$(ATMBOOT_KERNEL_SECTORS) status=none
 	dd if=build/atmboot-kernel-flat.bin of=$(ATMBOOT_KERNEL) conv=notrunc status=none
 	@cat $(ATMBOOT_STAGE0) $(ATMBOOT_STAGE2_PAD) $(ATMBOOT_KERNEL) > $(ATMBOOT_IMG)
 	@echo "[+] ATMBOOT BIOS image: $(ATMBOOT_IMG) ($$(wc -c < $(ATMBOOT_IMG)) bytes)"
 
-# ATMUEFI is a UEFI x86-64 FAT ESP image. It shares the exact flat kernel
-# payload with ATMBOOT but loads it through UEFI Simple File System + GOP.
-atmuefi: $(KERNEL) | build
+# Archived ATMUEFI UEFI x86-64 FAT ESP image. Retained for historical/recovery
+# inspection; current feature work targets the Limine hybrid ISO only.
+atmuefi: $(KERNEL) $(ATMLOADER_CONTRACT) | build
 	@test "$$(nm -n $(KERNEL) | awk '/ uefi_start$$/{print $$1}')" = "0000000004001158" || (echo "ERROR: ATMUEFI uefi_start layout changed; update handoff address" && exit 1)
 	@mkdir -p $(ATMUEFI_DIR)
 	$(CC) -I/usr/include/efi -I/usr/include/efi/x86_64 -fpic -fshort-wchar -mno-red-zone -fno-stack-protector -ffreestanding -fno-strict-aliasing -maccumulate-outgoing-args -DGNU_EFI_USE_MS_ABI -c boot/atmuefi/loader.c -o $(ATMUEFI_DIR)/loader.o

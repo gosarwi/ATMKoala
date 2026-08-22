@@ -38,8 +38,24 @@ if command -v pnmtopng >/dev/null 2>&1; then
 else
   convert "$CAPTURE" "$PNG"
 fi
+grep -Fq '[boot] splash-shown' "$SERIAL" || {
+  echo 'Graphical boot splash did not report serial [boot] splash-shown' >&2
+  exit 1
+}
 grep -Fq '[linux] l0-ok' "$SERIAL" || {
   echo 'Linux L0 regression did not report serial [linux] l0-ok' >&2
+  exit 1
+}
+grep -Fq '[linux] descriptor-ok' "$SERIAL" || {
+  echo 'Linux descriptor regression did not report serial [linux] descriptor-ok' >&2
+  exit 1
+}
+grep -Fq '[linux] session-ok' "$SERIAL" || {
+  echo 'Linux process-group/session regression did not report serial [linux] session-ok' >&2
+  exit 1
+}
+grep -Fq '[linux] v22-ok' "$SERIAL" || {
+  echo 'Linux descriptor metadata, positional-vector, fchdir, getrusage, times, getrlimit, faccessat, namespace-at and signal-0 regression did not report serial [linux] v22-ok' >&2
   exit 1
 }
 grep -Fq '[linux] l1-ok' "$SERIAL" || {
@@ -54,12 +70,28 @@ grep -Fq '[exec] ok' "$SERIAL" || {
   echo 'Native exec regression did not report serial [exec] ok' >&2
   exit 1
 }
+grep -Fq '[native] cpl3-signal-ok' "$SERIAL" || {
+  echo 'CPL3 direct-child signal regression did not report serial [native] cpl3-signal-ok' >&2
+  exit 1
+}
 grep -Fq '[libc] smoke-ok' "$SERIAL" || {
   echo 'POSIX static libc regression did not report serial [libc] smoke-ok' >&2
   exit 1
 }
 grep -Fq '[vbe] fastpath-ok' "$SERIAL" || {
   echo 'VBE fast-path regression did not report serial [vbe] fastpath-ok' >&2
+  exit 1
+}
+grep -Fq '[mouse] packet-ok' "$SERIAL" || {
+  echo 'Mouse packet validation did not report serial [mouse] packet-ok' >&2
+  exit 1
+}
+grep -Fq '[udp] parser-ok' "$SERIAL" || {
+  echo 'Bounded UDP parser regression did not report serial [udp] parser-ok' >&2
+  exit 1
+}
+grep -Fq '[ntp] parser-ok' "$SERIAL" || {
+  echo 'Manual NTP parser regression did not report serial [ntp] parser-ok' >&2
   exit 1
 }
 grep -Fq '[http] parser-ok' "$SERIAL" || {
@@ -86,6 +118,10 @@ grep -Fq '[installer] ui-ok' "$SERIAL" || {
   echo 'Installer UI regression did not report serial [installer] ui-ok' >&2
   exit 1
 }
+grep -Fq '[init] runtime-ok' "$SERIAL" || {
+  echo 'Init runtime regression did not report serial [init] runtime-ok' >&2
+  exit 1
+}
 grep -Fq '[exp] utf8-layout-ok' "$SERIAL" || {
   echo 'Exp UTF-8 layout regression did not report serial [exp] utf8-layout-ok' >&2
   exit 1
@@ -94,8 +130,20 @@ grep -Fq '[time] timezone-ok' "$SERIAL" || {
   echo 'Timezone conversion regression did not report serial [time] timezone-ok' >&2
   exit 1
 }
+grep -Fq '[rtc] writer-ok' "$SERIAL" || {
+  echo 'RTC writer encoding regression did not report serial [rtc] writer-ok' >&2
+  exit 1
+}
+grep -Fq '[tzif] parser-ok' "$SERIAL" || {
+  echo 'Bounded TZif parser regression did not report serial [tzif] parser-ok' >&2
+  exit 1
+}
 grep -Fq '[pkg] repo-ok' "$SERIAL" || {
   echo 'Package repository URL regression did not report serial [pkg] repo-ok' >&2
   exit 1
 }
-echo 'Linux x86-64 SYSCALL L0/L1/L3, native exec, package repository, HTTP parser, MP3 parser, HDA discovery, UHD 600 discovery, hardware status, Disk Install UI, Exp UTF-8 text layout, timezone conversion, VBE fast-path and POSIX static-libc regressions passed.'
+grep -Fq '[ixpy] parser-raw-source-ok' "$SERIAL" || {
+  echo 'Restricted ixpy parser/raw-source regression did not report serial [ixpy] parser-raw-source-ok' >&2
+  exit 1
+}
+echo 'Graphical ATMKoala boot splash plus Linux x86-64 SYSCALL L0/L1/L3, bounded UDP, manual NTP, RTC writer encoding and TZif parser checks, descriptor flags/metadata, process-group/session calls, positional vector I/O, fchdir, getrusage, times, getrlimit, faccessat and namespace-at, native exec, CPL3 direct-child signal delivery, package repository, HTTP parser, MP3 parser, HDA discovery, UHD 600 discovery, hardware status, Disk Install UI, init runtime, Exp UTF-8 text layout, timezone conversion, VBE fast-path, mouse packet validation, restricted ixpy parser/raw-source and POSIX static-libc regressions passed.'

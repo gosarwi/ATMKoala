@@ -17,8 +17,10 @@ struct pollfd {
 #define POLLHUP  0x0010
 #define POLLNVAL 0x0020
 
-/* ATMKoala v0.9 currently supports timeout == 0 and task-owned pipe FDs.
- * Other descriptor classes return POLLNVAL; blocking timeouts are rejected. */
+/* ATMKoala accepts up to 16 task-owned descriptors and finite timeouts up to
+ * 600000 ms. Pipes provide bounded data/space/HUP readiness. TCP sockets expose
+ * only local state: established POLLOUT, buffered out-of-order POLLIN, terminal
+ * POLLHUP/POLLERR. It does not poll the wire or make listeners accept-ready. */
 int poll(struct pollfd *fds,nfds_t nfds,int timeout);
 
 #endif

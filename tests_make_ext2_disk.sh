@@ -11,7 +11,7 @@ dd if=/dev/zero of="$DATA" bs=1M count=6 status=none
 printf 'DIRECT-OK\n' | dd of="$DATA" bs=1 seek=0 conv=notrunc status=none
 printf 'SINGLE-INDIRECT-OK\n' | dd of="$DATA" bs=1 seek=$((12*4096)) conv=notrunc status=none
 printf 'DOUBLE-INDIRECT-OK\n' | dd of="$DATA" bs=1 seek=$(((12+1024)*4096)) conv=notrunc status=none
-mkfs.ext2 -q -F -b 4096 -L ATM-EXT2-TEST "$FS" 8192
+mkfs.ext2 -q -F -b 4096 -L ATM-EXT2-TEST "$FS" 8192 >/dev/null 2>&1
 debugfs -w -R "write $DATA /indirect.bin" "$FS" >/dev/null 2>&1
 debugfs -w -R "symlink /marker-link /indirect.bin" "$FS" >/dev/null 2>&1
 # Disk: 1 MiB MBR gap then a 32 MiB Linux/EXT2 primary partition.

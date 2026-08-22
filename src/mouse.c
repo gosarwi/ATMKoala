@@ -28,6 +28,12 @@ static mouse_state_t g_mouse;
 static int g_screen_w=800, g_screen_h=600;
 static uint8_t g_packet[3];
 static int g_packet_pos;
+/* Even outside updates, odd while the IRQ publishes a new x/y/button tuple. */
+static volatile uint32_t g_state_seq;
+
+static int mouse_packet_signs_ok(uint8_t flags,uint8_t x,uint8_t y){
+    return (!!(flags&0x10)==!!(x&0x80)) && (!!(flags&0x20)==!!(y&0x80));
+}
 
 static int wait_input_clear(void) {
     for (int i=0;i<100000;i++) {
@@ -113,20 +119,27 @@ static void mouse_irq(registers_t *r) {
 
     uint8_t flags=g_packet[0];
     if (flags&0xC0) { g_mouse.dropped_packets++; return; } /* X/Y overflow: discard this packet */
+    /* A lost byte can still produce a superficially valid bit-3 header.
+     * PS/2 sign bits must agree with movement-byte bit 7; reject a malformed
+     * tuple rather than interpreting it as a large cursor movement. */
+    if(!mouse_packet_signs_ok(flags,g_packet[1],g_packet[2])){g_mouse.dropped_packets++;return;}
     int dx=(int)g_packet[1]; if (flags&0x10) dx-=256;
     int dy=(int)g_packet[2]; if (flags&0x20) dy-=256;
     int nx=g_mouse.x+dx;
     int ny=g_mouse.y-dy; /* PS/2 Y grows upward; framebuffer Y downward */
     if (nx<0) nx=0; else if (nx>=g_screen_w) nx=g_screen_w-1;
     if (ny<0) ny=0; else if (ny>=g_screen_h) ny=g_screen_h-1;
+    /* Publish the logical cursor as one coherent sample for the Exp frame. */
+    g_state_seq++; __asm__ volatile("" ::: "memory");
     g_mouse.x=nx; g_mouse.y=ny;
     g_mouse.buttons=(uint8_t)(flags&0x07);
     g_mouse.packets++;
+    __asm__ volatile("" ::: "memory"); g_state_seq++;
 }
 
 void mouse_init(int screen_w, int screen_h) {
     kmemset(&g_mouse,0,sizeof(g_mouse));
-    g_packet_pos=0;
+    g_packet_pos=0; g_state_seq=0;
     if (screen_w>0) g_screen_w=screen_w;
     if (screen_h>0) g_screen_h=screen_h;
     g_mouse.x=g_screen_w/2; g_mouse.y=g_screen_h/2;
@@ -161,6 +174,25 @@ void mouse_init(int screen_w, int screen_h) {
 }
 
 const mouse_state_t *mouse_state(void) { return &g_mouse; }
+int mouse_snapshot(mouse_state_t *out){
+    if(!out)return 0;
+    for(int attempt=0;attempt<8;attempt++){
+        uint32_t before=g_state_seq;if(before&1)continue;
+        __asm__ volatile("" ::: "memory");
+        out->x=g_mouse.x;out->y=g_mouse.y;out->buttons=g_mouse.buttons;
+        out->available=g_mouse.available;out->packets=g_mouse.packets;
+        out->dropped_packets=g_mouse.dropped_packets;out->irq_bytes=g_mouse.irq_bytes;
+        out->sync_losses=g_mouse.sync_losses;out->controller_drained=g_mouse.controller_drained;
+        out->init_status=g_mouse.init_status;
+        __asm__ volatile("" ::: "memory");
+        if(before==g_state_seq)return 1;
+    }
+    return 0;
+}
+int mouse_packet_selftest(void){
+    return mouse_packet_signs_ok(0x08,1,1)&&mouse_packet_signs_ok(0x38,0xff,0xff)&&
+           !mouse_packet_signs_ok(0x08,0xff,1)&&!mouse_packet_signs_ok(0x08,1,0xff)?0:-1;
+}
 const char *mouse_status_string(void){
     switch(g_mouse.init_status){
     case MOUSE_INIT_READY:return "ready";

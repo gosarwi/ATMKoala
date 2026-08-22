@@ -164,6 +164,13 @@ typedef struct __attribute__((packed)) {
  * flagged by stricter stacks if the checksum is missing). */
 uint16_t net_ip_checksum(const void *data, int len);
 
+/* Bounded raw IPv4/UDP exchange helpers for kernel protocols. This is not a
+ * user socket ABI: callers serialize requests and validate their own replies. */
+#define NET_UDP_PAYLOAD_MAX 512
+int net_udp_sendto(const uint8_t dst_ip[4],uint16_t src_port,uint16_t dst_port,const void *payload,uint16_t len);
+int net_udp_recvfrom(uint16_t dst_port,uint8_t src_ip[4],uint16_t *src_port,void *payload,uint16_t cap,uint16_t *out_len);
+int net_udp_selftest(void);
+
 /* Byte-swap helpers (host is little-endian x86-64, network order is
  * big-endian) — shared so every protocol module agrees on the name. */
 static inline uint16_t net_bswap16(uint16_t x) {

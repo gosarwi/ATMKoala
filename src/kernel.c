@@ -27,6 +27,8 @@
 #include "pit.h"
 #include "rtc.h"
 #include "atm_time.h"
+#include "ntp.h"
+#include "tzif.h"
 #include "kmalloc.h"
 #include "sched.h"
 #include "elf.h"
@@ -616,6 +618,23 @@ static int parse_args(char *line, char **argv, int maxargc) {
     return argc;
 }
 
+/* ====== ixpy: bounded expression/print interpreter ============================================= */
+typedef struct {char name[16];int value;} ixpy_var_t;
+typedef struct {const char *p;ixpy_var_t vars[8];int var_count,error,last_value,prints;} ixpy_ctx_t;
+static void ixpy_ws(ixpy_ctx_t*c){while(*c->p==' '||*c->p=='\t'||*c->p=='\n'||*c->p=='\r')c->p++;}
+static int ixpy_ident(ixpy_ctx_t*c,char out[16]){int n=0;ixpy_ws(c);if(!((*c->p>='a'&&*c->p<='z')||(*c->p>='A'&&*c->p<='Z')||*c->p=='_'))return -1;while(((*c->p>='a'&&*c->p<='z')||(*c->p>='A'&&*c->p<='Z')||(*c->p>='0'&&*c->p<='9')||*c->p=='_')&&n<15)out[n++]=*c->p++;out[n]=0;return n?0:-1;}
+static int ixpy_get(ixpy_ctx_t*c,const char*name,int*out){for(int i=0;i<c->var_count;i++)if(!kstrcmp(c->vars[i].name,name)){*out=c->vars[i].value;return 0;}c->error=1;return -1;}
+static int ixpy_set(ixpy_ctx_t*c,const char*name,int value){for(int i=0;i<c->var_count;i++)if(!kstrcmp(c->vars[i].name,name)){c->vars[i].value=value;return 0;}if(c->var_count>=8){c->error=1;return -1;}kstrncpy(c->vars[c->var_count].name,name,15);c->vars[c->var_count++].value=value;return 0;}
+static int ixpy_expr(ixpy_ctx_t*c,int*out);
+static int ixpy_primary(ixpy_ctx_t*c,int*out){char name[16];int v=0;ixpy_ws(c);if(*c->p=='('){c->p++;if(ixpy_expr(c,&v)<0)return -1;ixpy_ws(c);if(*c->p!=')'){c->error=1;return -1;}c->p++;*out=v;return 0;}if(*c->p>='0'&&*c->p<='9'){while(*c->p>='0'&&*c->p<='9'){v=v*10+(*c->p-'0');c->p++;}*out=v;return 0;}if(ixpy_ident(c,name)==0){if(ixpy_get(c,name,&v)<0)return -1;*out=v;return 0;}c->error=1;return -1;}
+static int ixpy_term(ixpy_ctx_t*c,int*out){int v=0,r=0;if(ixpy_primary(c,&v)<0)return -1;for(;;){ixpy_ws(c);char op=*c->p;if(op!='*'&&op!='/'&&op!='%')break;c->p++;if(ixpy_primary(c,&r)<0)return -1;if((op=='/'||op=='%')&&!r){c->error=1;return -1;}if(op=='*')v*=r;else if(op=='/')v/=r;else v%=r;}*out=v;return 0;}
+static int ixpy_expr(ixpy_ctx_t*c,int*out){int v=0,r=0,sign=1;ixpy_ws(c);if(*c->p=='-'){sign=-1;c->p++;}if(ixpy_term(c,&v)<0)return -1;v*=sign;for(;;){ixpy_ws(c);char op=*c->p;if(op!='+'&&op!='-')break;c->p++;if(ixpy_term(c,&r)<0)return -1;if(op=='+')v+=r;else v-=r;}*out=v;return 0;}
+static int ixpy_word(ixpy_ctx_t*c,const char*word){const char*s=c->p;for(;*word;word++)if(*c->p++!=*word){c->p=s;return 0;}if((*c->p>='a'&&*c->p<='z')||(*c->p>='A'&&*c->p<='Z')||*c->p=='_'){c->p=s;return 0;}return 1;}
+static int ixpy_execute(const char*source,int emit,ixpy_ctx_t*outctx){ixpy_ctx_t c;kmemset(&c,0,sizeof(c));c.p=source?source:"";ixpy_ws(&c);int outer=0;if(*c.p=='('){outer=1;c.p++;}for(;;){char name[16];int value=0;ixpy_ws(&c);if(outer&&*c.p==')'){c.p++;ixpy_ws(&c);if(*c.p)c.error=1;break;}if(!*c.p)break;if(ixpy_word(&c,"print")){ixpy_ws(&c);if(*c.p!='('){c.error=1;break;}c.p++;ixpy_ws(&c);if(*c.p=='\"'||*c.p=='\''){char q=*c.p++;const char*start=c.p;while(*c.p&&*c.p!=q)c.p++;if(*c.p!=q){c.error=1;break;}if(emit)while(start<c.p)con_putchar(*start++);if(emit)con_putchar('\n');c.p++;}else{if(ixpy_expr(&c,&value)<0)break;c.last_value=value;if(emit)cprintf("%d\n",value);}ixpy_ws(&c);if(*c.p!=')'){c.error=1;break;}c.p++;c.prints++;}else if(ixpy_ident(&c,name)==0){ixpy_ws(&c);if(*c.p!='='){c.error=1;break;}c.p++;if(ixpy_expr(&c,&value)<0)break;if(ixpy_set(&c,name,value)<0)break;}else{c.error=1;break;}ixpy_ws(&c);if(*c.p==';'){c.p++;continue;}if(outer&&*c.p==')')continue;if(!*c.p)break;c.error=1;break;}if(outctx)*outctx=c;return c.error?-1:0;}
+static const char *ixpy_source_suffix(const char *line){while(line&&(*line==' '||*line=='\t'))line++;if(!line||kstrncmp(line,"ixpy",4)||(line[4]&&line[4]!=' '&&line[4]!='\t'))return NULL;return line+4;}
+static int ixpy_selftest(void){ixpy_ctx_t c;const char *raw=ixpy_source_suffix("ixpy ( print (\"hello world\") )");if(ixpy_execute("(x=7; print(x*2+1))",0,&c)<0||c.last_value!=15||c.prints!=1)return -1;if(!raw||ixpy_execute(raw,0,&c)<0||c.prints!=1)return -1;return ixpy_execute("import os",0,&c)<0?0:-1;}
+static void ixpy_command(const char *source){while(source&&(*source==' '||*source=='\t'))source++;if(!source||!*source){con_writeln("usage: ixpy ( print(\"hello world\") )");con_writeln("ixpy supports integers, + - * / %, variables, assignments and print(...).");con_writeln("unsupported: imports, files, functions, loops, classes, eval and CPython modules.");return;}ixpy_ctx_t c;if(ixpy_execute(source,1,&c)<0){C_ERR();con_writeln("ixpy: syntax, name, divide-by-zero or unsupported feature");C_NRM();}}
+
 /* ====== interactive credential input ========================================================================================================================== */
 static void read_secret(const char *label, char *out, int maxlen) {
     C_WRN(); con_write(label); C_NRM();
@@ -667,11 +686,26 @@ static void initctl_show_log(int tail) {
         if (entry) cprintf("[%6us] %-7s %-12s %s\n",entry->tick/100U,entry->event,entry->service,entry->detail);
     }
 }
+static void initctl_show_kernel_log(int tail) {
+    int count=atminit_kernel_log_count();
+    if (tail<=0 || tail>count) tail=count;
+    cprintf("kernel kprintf log: showing %d/%d retained messages\n",tail,count);
+    for (int i=count-tail;i<count;i++) {
+        const atm_kernel_log_entry_t *entry=atminit_kernel_log_at(i);
+        if (entry) cprintf("[#%u] %s\n",entry->sequence,entry->text);
+    }
+}
+static void initctl_show_memory(void) {
+    atm_memory_status_t mem;
+    atminit_memory_status(&mem);
+    cprintf("Memory lamps: heap %u%% [%s]  used %u B  free %u B\n",mem.heap_percent,atminit_memory_pressure_name(mem.pressure),mem.heap_used,mem.heap_free);
+    cprintf("Task resident: %u B across %u task(s); this is scheduler accounting, not physical-RAM total.\n",(uint32_t)mem.task_resident,mem.task_count);
+}
 
 static void initctl_session(void) {
     char line[CMD_MAX];
     con_writeln("ATM initctl: live native-service console");
-    con_writeln("Commands: status | log [N] | logfile | viewer | start NAME | stop NAME | restart NAME | enable NAME | disable NAME | runlevel 0|1|3|5 | help | exit");
+    con_writeln("Commands: status | log [N] | kernel [N] | memory | logfile | viewer | start NAME | stop NAME | restart NAME | enable NAME | disable NAME | runlevel 0|1|3|5 | help | exit");
     for (;;) {
         C_ACC(); con_write("initctl> "); C_NRM();
         readline_v6(line,sizeof(line));
@@ -679,11 +713,13 @@ static void initctl_session(void) {
         if (!argc) continue;
         if (!kstrcmp(argv[0],"exit") || !kstrcmp(argv[0],"quit")) break;
         if (!kstrcmp(argv[0],"help")) {
-            con_writeln("status, log [N], logfile, viewer, start/stop/restart NAME, enable/disable NAME, runlevel 0|1|3|5, exit");
+            con_writeln("status, log [N], kernel [N], memory, logfile, viewer, start/stop/restart NAME, enable/disable NAME, runlevel 0|1|3|5, exit");
             continue;
         }
         if (!kstrcmp(argv[0],"status")) { initctl_show_status(); continue; }
         if (!kstrcmp(argv[0],"log")) { initctl_show_log(argc>1?kstrtoi(argv[1]):20); continue; }
+        if (!kstrcmp(argv[0],"kernel")) { initctl_show_kernel_log(argc>1?kstrtoi(argv[1]):20); continue; }
+        if (!kstrcmp(argv[0],"memory")) { initctl_show_memory(); continue; }
         if (!kstrcmp(argv[0],"logfile")) { cprintf("Persistent log path: %s (writable CatFS only)\n",atminit_log_path()); continue; }
         if (!kstrcmp(argv[0],"viewer")) {
             if (!use_vbe) { cprintf("initctl: GUI inactive; use view %s\n",atminit_log_path()); continue; }
@@ -1596,6 +1632,16 @@ void dispatch(char *line) {
             O_WRONLY|O_CREAT|(redir_append?O_APPEND:O_TRUNC), 0644);
     }
 
+    /* ixpy is parsed from the raw command suffix so nested string quotes are
+     * preserved. Generic argv parsing intentionally strips quotes and would
+     * turn print(\"hello world\") into an identifier expression. */
+    const char *ixpy_source=ixpy_source_suffix(line);
+    if(ixpy_source){
+        if(cmd_is_disabled("ixpy")){C_ERR();con_writeln("ixpy: command disabled by kernel config");C_NRM();}
+        else ixpy_command(ixpy_source);
+        goto done;
+    }
+
     char *argv[64]; int argc = parse_args(line, argv, 64);
     if (argc == 0) { if(redirect_fd>=0){vfs_close(redirect_fd);redirect_fd=-1;} return; }
     const char *cmd = argv[0];
@@ -1617,6 +1663,7 @@ void dispatch(char *line) {
         dispatch(sub); sudo_mode=old; vfs_set_credentials(saved_uid,saved_gid);
         goto done;
     }
+
     /* su [account]: establish a persistent console session for that account. */
     if (!kstrcmp(cmd,"su")) {
         const char *target=(argc>=2)?argv[1]:"root";
@@ -2085,9 +2132,25 @@ void dispatch(char *line) {
         con_writeln("[    0.009] UNM: UserNet Manager ready");
         con_writeln("[    0.010] Shell ready");
     }
+    else if (!kstrcmp(cmd,"tzif")) {
+        if(argc<2){con_writeln("tzif: import <source> <IANA-name> | use <IANA-name> | remove <IANA-name> | status");goto done;}
+        if(!kstrcmp(argv[1],"status")){const char *active_name=tzif_active_name();if(active_name[0])cprintf("tzif: active %s (bounded loaded transition set)\n",active_name);else con_writeln("tzif: no archive zone loaded; embedded current-era rules remain active");goto done;}
+        if(!kstrcmp(argv[1],"import")&&argc>=4){if(tzif_import(argv[2],argv[3])<0){C_ERR();con_writeln("tzif: import failed (mounted CatFS, regular <=8 KiB TZif source, safe name, or target already exists required)");C_NRM();goto done;}C_OK();con_writeln("tzif: imported; run tzif use <IANA-name> to activate");C_NRM();goto done;}
+        if(!kstrcmp(argv[1],"use")&&argc>=3){if(tzif_load(argv[2])<0){C_ERR();con_writeln("tzif: load failed (CatFS mount, safe name, regular file, or bounded TZif v1/v2/v3 validation)");C_NRM();goto done;}if(sysconf_set("system","timezone",argv[2])<0){C_ERR();con_writeln("tzif: loaded but could not save selected name");C_NRM();goto done;}sysconf_save();C_OK();cprintf("tzif: active zone set to %s\n",tzif_active_name());C_NRM();goto done;}
+        if(!kstrcmp(argv[1],"remove")&&argc>=3){const char *saved=sysconf_get("system","timezone");if(tzif_remove(argv[2])<0){C_ERR();con_writeln("tzif: remove failed");C_NRM();goto done;}if(saved&&!kstrcmp(saved,argv[2])){sysconf_set("system","timezone","UTC");sysconf_save();}C_OK();con_writeln("tzif: removed; active selection falls back to embedded UTC if needed");C_NRM();goto done;}
+        con_writeln("tzif: import <source> <IANA-name> | use <IANA-name> | remove <IANA-name> | status");goto done;
+    }
+    else if (!kstrcmp(cmd,"ntp")) {
+        const char *basis=sysconf_get("system","rtc_basis");
+        if(argc<2){con_writeln("ntp: sync <IPv4-or-hostname> | status | write-rtc WRITE_RTC (manual only; UTC RTC required)");goto done;}
+        if(!kstrcmp(argv[1],"status")){int64_t correction=0;atm_realtime_correction_seconds(&correction);cprintf("ntp: manual only; volatile UTC correction %+lld seconds; use `ntp write-rtc WRITE_RTC` only after review\n",correction);goto done;}
+        if(!kstrcmp(argv[1],"write-rtc")){if(basis&&!kstrcmp(basis,"local")){C_ERR();con_writeln("ntp: RTC writeback requires timezone clock utc");C_NRM();goto done;}if(argc!=3||kstrcmp(argv[2],"WRITE_RTC")){con_writeln("ntp: write-rtc requires exact confirmation: ntp write-rtc WRITE_RTC");goto done;}rtc_datetime_t utc;if(atm_realtime_utc(&utc)<0||rtc_write_datetime(&utc)<0){C_ERR();con_writeln("ntp: RTC writeback failed; volatile correction remains active");C_NRM();goto done;}atm_realtime_clear_correction();C_OK();con_writeln("ntp: confirmed UTC time written to CMOS; volatile correction cleared");C_NRM();goto done;}
+        if(!kstrcmp(argv[1],"sync")&&argc>=3){if(basis&&!kstrcmp(basis,"local")){C_ERR();con_writeln("ntp: sync requires timezone clock utc; firmware-local RTC cannot be safely corrected");C_NRM();goto done;}ntp_result_t result;if(ntp_sync_once(argv[2],&result)<0){C_ERR();con_writeln("ntp: sync failed (network, DNS, timeout, or invalid server reply)");C_NRM();goto done;}rtc_datetime_t utc;if(atm_realtime_utc(&utc)<0){C_ERR();con_writeln("ntp: reply accepted but corrected UTC clock is unavailable");C_NRM();goto done;}C_OK();cprintf("ntp: %u.%u.%u.%u stratum %u -> UTC %04d-%02d-%02d %02d:%02d:%02d (%u ms); volatile until reboot\n",result.server_ip[0],result.server_ip[1],result.server_ip[2],result.server_ip[3],result.stratum,utc.year,utc.month,utc.day,utc.hour,utc.minute,utc.second,result.roundtrip_ticks*10u);C_NRM();goto done;}
+        con_writeln("ntp: sync <IPv4-or-hostname> | status | write-rtc WRITE_RTC (manual only; UTC RTC required)");goto done;
+    }
     else if (!kstrcmp(cmd,"date")) {
         uint32_t s=sched_uptime_ticks()/100;const char *tz=sysconf_get("system","timezone"),*basis=sysconf_get("system","rtc_basis");rtc_datetime_t now;int offset=0,dst=0;
-        if(rtc_read_datetime(&now)==0){
+        if((basis&& !kstrcmp(basis,"local")?rtc_read_datetime(&now):atm_realtime_utc(&now))==0){
             if(!basis||kstrcmp(basis,"local")!=0){
                 rtc_datetime_t local;if(atm_timezone_convert(tz&&tz[0]?tz:"UTC",&now,&local,&offset,&dst)==0){int a=offset<0?-offset:offset;cprintf("Local %04d-%02d-%02d %02d:%02d:%02d  zone=%s UTC%c%02d:%02d%s\n",local.year,local.month,local.day,local.hour,local.minute,local.second,tz&&tz[0]?tz:"UTC",offset<0?'-':'+',a/60,a%60,dst?" DST":"");con_writeln("CMOS RTC is configured as UTC; local civil time uses ATMKoala's embedded current-era timezone rules.");}
                 else {cprintf("CMOS UTC %04d-%02d-%02d %02d:%02d:%02d  zone=%s\n",now.year,now.month,now.day,now.hour,now.minute,now.second,tz&&tz[0]?tz:"UTC");con_writeln("Selected zone is not in the embedded rule table; choose a listed zone.");}
@@ -2096,9 +2159,10 @@ void dispatch(char *line) {
     }
     else if (!kstrcmp(cmd,"timezone")) {
         const char *saved_tz=sysconf_get("system","timezone"),*basis=sysconf_get("system","rtc_basis");
-        if(argc==1){cprintf("timezone: %s (RTC basis: %s)\n",saved_tz&&saved_tz[0]?saved_tz:"UTC",basis&&!kstrcmp(basis,"local")?"local":"UTC");con_writeln("usage: timezone [IANA-style name] | timezone list | timezone clock utc|local");goto done;}
+        if(argc==1){cprintf("timezone: %s (RTC basis: %s, %u embedded zones)\n",saved_tz&&saved_tz[0]?saved_tz:"UTC",basis&&!kstrcmp(basis,"local")?"local":"UTC",atm_timezone_count());con_writeln("usage: timezone [IANA-style name] | timezone set <name> | timezone now [name] | timezone list | timezone clock utc|local");goto done;}
         if(!kstrcmp(argv[1],"clock")){if(argc<3|| (kstrcmp(argv[2],"utc")&&kstrcmp(argv[2],"local"))){C_ERR();con_writeln("timezone clock: choose utc or local");C_NRM();goto done;}if(sysconf_set("system","rtc_basis",argv[2])<0){C_ERR();con_writeln("timezone: configuration capacity reached");C_NRM();goto done;}sysconf_save();C_OK();cprintf("timezone: firmware RTC basis saved as %s\n",argv[2]);C_NRM();goto done;}
-        if(!kstrcmp(argv[1],"list")){con_writeln("UTC; Europe: London Dublin Reykjavik Lisbon Madrid Paris Berlin Rome Warsaw Athens Helsinki Kyiv Moscow Istanbul");con_writeln("Africa: Casablanca Algiers Lagos Cairo Johannesburg Nairobi; Asia: Jerusalem Riyadh Dubai Tehran Kabul Karachi Tashkent Yekaterinburg Omsk Novosibirsk Krasnoyarsk Irkutsk Yakutsk Vladivostok Magadan Kamchatka Kolkata Kathmandu Colombo Dhaka Yangon Bangkok Jakarta Kuala_Lumpur Singapore Shanghai Hong_Kong Taipei Seoul Tokyo");con_writeln("Australia: Perth Darwin Adelaide Brisbane Sydney Hobart; Pacific: Port_Moresby Guam Fiji Auckland Honolulu Pago_Pago");con_writeln("America: St_Johns Halifax Toronto New_York Detroit Chicago Winnipeg Mexico_City Guatemala Costa_Rica Panama Bogota Lima Caracas La_Paz Santiago Asuncion Montevideo Argentina/Buenos_Aires Sao_Paulo Phoenix Denver Edmonton Los_Angeles Vancouver Anchorage");con_writeln("Listed identifiers have embedded current-era UTC/DST rules. Default RTC basis is UTC; use timezone clock local only if firmware already keeps local time. No NTP or historic TZif database.");goto done;}
+        if(!kstrcmp(argv[1],"list")){uint32_t count=atm_timezone_count();cprintf("Supported embedded zones (%u):\n",count);for(uint32_t i=0;i<count;i++)cprintf("  %3u  %s\n",i+1,atm_timezone_name(i));con_writeln("Use timezone now <name> to preview a zone, or timezone set <name> to save it. Current-era rules only; no NTP or historic TZif database.");goto done;}
+        if(!kstrcmp(argv[1],"now")){const char *view=argc>=3?argv[2]:(saved_tz&&saved_tz[0]?saved_tz:"UTC");rtc_datetime_t utc,local;int offset=0,dst=0;if(!atm_timezone_supported(view)){C_ERR();con_writeln("timezone now: choose a listed embedded identifier");C_NRM();goto done;}if(basis&&!kstrcmp(basis,"local")){C_ERR();con_writeln("timezone now: conversion requires timezone clock utc; firmware is configured as local");C_NRM();goto done;}if(rtc_read_datetime(&utc)<0||atm_timezone_convert(view,&utc,&local,&offset,&dst)<0){C_ERR();con_writeln("timezone now: CMOS RTC unavailable or invalid");C_NRM();goto done;}int a=offset<0?-offset:offset;C_OK();cprintf("%s  %04d-%02d-%02d %02d:%02d:%02d  UTC%c%02d:%02d%s\n",view,local.year,local.month,local.day,local.hour,local.minute,local.second,offset<0?'-':'+',a/60,a%60,dst?" DST":"");C_NRM();goto done;}
         const char *tz=!kstrcmp(argv[1],"set")&&argc>=3?argv[2]:argv[1];int valid=tz[0]&&kstrlen(tz)<64;
         for(const char *p=tz;*p&&valid;p++)if(!((*p>='A'&&*p<='Z')||(*p>='a'&&*p<='z')||(*p>='0'&&*p<='9')||*p=='/'||*p=='_'||*p=='+'||*p=='-'))valid=0;
         if(!valid||!atm_timezone_supported(tz)){C_ERR();con_writeln("timezone: choose a listed identifier with embedded conversion rules");C_NRM();goto done;}
@@ -2635,6 +2699,7 @@ void dispatch(char *line) {
             cprintf("  Sync        : %s\n",(f&ATM_POSIX_SYNC)?"fsync/fdatasync (backend-supported persistence)":"unavailable");
             cprintf("  Links       : %s\n",(f&ATM_POSIX_LINKS)?"hard links, symlinks and readlink":"unavailable");
             cprintf("  Runtime     : %s\n",(f&ATM_POSIX_CWD)?"cwd/chdir, relative paths, access, umask, directories, isatty":"unavailable");
+            cprintf("  Sessions    : %s\n",(f&ATM_POSIX_SESSION)?"getpgid/getsid query only; no shell job control":"unavailable");
             cprintf("  Dir streams : task-owned opaque opendir/readdir/closedir handles (native ABI v7)\n");
             cprintf("  Poll        : zero-timeout pipe readiness only; blocking timeout and socket/VFS readiness unavailable\n");
             cprintf("  Address space: kernel map clone + user page window (CR3=0x%x)\n",(uint32_t)paging_kernel_cr3());
@@ -2649,15 +2714,29 @@ void dispatch(char *line) {
             sdk_serial_write("[posix] dir\n"); int nd=native_dir_selftest();
             sdk_serial_write("[posix] native\n"); int na=native_app_selftest();
             sdk_serial_write("[posix] linux-l0\n"); int la=native_app_linux_abi_selftest();
+            sdk_serial_write("[posix] linux-descriptor\n"); int ld=native_app_linux_descriptor_selftest();
+            if(ld==0)sdk_serial_write("[linux] descriptor-ok\n");else sdk_serial_write("[linux] descriptor-fail\n");
+            sdk_serial_write("[posix] linux-session\n"); int ls=native_app_linux_session_selftest();
+            if(ls==0)sdk_serial_write("[linux] session-ok\n");else sdk_serial_write("[linux] session-fail\n");
+            sdk_serial_write("[posix] linux-v22\n"); int lv22=native_app_linux_v22_selftest();
+            if(lv22==0)sdk_serial_write("[linux] v22-ok\n");else sdk_serial_write("[linux] v22-fail\n");
             sdk_serial_write("[posix] linux-l1\n"); int l1=native_app_linux_l1_selftest();
             sdk_serial_write("[posix] linux-l3\n"); int l3=native_app_linux_l3_selftest();
             sdk_serial_write("[posix] exec\n"); int ex=native_app_exec_selftest();
             sdk_serial_write("[posix] cpl3-wait\n"); int cw=native_app_cpl3_wait_selftest();
+            sdk_serial_write("[posix] cpl3-signal\n"); int csig=native_app_cpl3_signal_selftest();
+            if(csig==0)sdk_serial_write("[native] cpl3-signal-ok\n");else sdk_serial_write("[native] cpl3-signal-fail\n");
             sdk_serial_write("[posix] libc\n"); int lc=native_app_libc_selftest();
             sdk_serial_write("[posix] pipe\n"); int ipc=native_app_pipe_ipc_selftest();
             sdk_serial_write("[posix] image\n"); int im=atm_image_selftest();
             sdk_serial_write("[vbe] fastpath\n"); int vf=vbe_fastpath_selftest();
             if(vf==0)sdk_serial_write("[vbe] fastpath-ok\n");else sdk_serial_write("[vbe] fastpath-fail\n");
+            sdk_serial_write("[mouse] packet\n"); int msp=mouse_packet_selftest();
+            if(msp==0)sdk_serial_write("[mouse] packet-ok\n");else sdk_serial_write("[mouse] packet-fail\n");
+            sdk_serial_write("[udp] parser\n"); int udp=net_udp_selftest();
+            if(udp==0)sdk_serial_write("[udp] parser-ok\n");else sdk_serial_write("[udp] parser-fail\n");
+            sdk_serial_write("[ntp] parser\n"); int ntp=ntp_selftest();
+            if(ntp==0)sdk_serial_write("[ntp] parser-ok\n");else sdk_serial_write("[ntp] parser-fail\n");
             sdk_serial_write("[http] parser\n"); int hp=atm_http_selftest();
             if(hp==0)sdk_serial_write("[http] parser-ok\n");else sdk_serial_write("[http] parser-fail\n");
             sdk_serial_write("[mp3] parser\n"); int mp=atm_mp3_selftest();
@@ -2670,13 +2749,21 @@ void dispatch(char *line) {
             if(hs==0)sdk_serial_write("[hardware] status-ok\n");else sdk_serial_write("[hardware] status-fail\n");
             sdk_serial_write("[installer] ui\n"); int ii=installer_selftest();
             if(ii==0)sdk_serial_write("[installer] ui-ok\n");else sdk_serial_write("[installer] ui-fail\n");
+            sdk_serial_write("[init] runtime\n"); int ir=atminit_selftest();
+            if(ir==0)sdk_serial_write("[init] runtime-ok\n");else sdk_serial_write("[init] runtime-fail\n");
             sdk_serial_write("[exp] utf8-layout\n"); int eu=exp_text_layout_selftest();
             if(eu==0)sdk_serial_write("[exp] utf8-layout-ok\n");else sdk_serial_write("[exp] utf8-layout-fail\n");
             sdk_serial_write("[time] timezone\n"); int tzr=atm_timezone_selftest();
             if(tzr==0)sdk_serial_write("[time] timezone-ok\n");else sdk_serial_write("[time] timezone-fail\n");
+            sdk_serial_write("[rtc] writer\n"); int rtcw=rtc_write_selftest();
+            if(rtcw==0)sdk_serial_write("[rtc] writer-ok\n");else sdk_serial_write("[rtc] writer-fail\n");
+            sdk_serial_write("[tzif] parser\n"); int tzif=tzif_selftest();
+            if(tzif==0)sdk_serial_write("[tzif] parser-ok\n");else sdk_serial_write("[tzif] parser-fail\n");
             sdk_serial_write("[pkg] repo\n"); int rp=tzst_repo_selftest();
             if(rp==0)sdk_serial_write("[pkg] repo-ok\n");else sdk_serial_write("[pkg] repo-fail\n");
-            cprintf("posix test: paging=%s uaccess=%s vfs-posix=%s syscall-usercopy=%s process-fd=%s native-dir=%s native-cpl3=%s linux-l0=%s linux-l1=%s linux-l3=%s exec=%s cpl3-wait=%s static-libc=%s pipe-ipc=%s image-bmp=%s vbe-fastpath=%s http-parser=%s mp3-parser=%s hda-detect=%s uhd600-detect=%s hardware-status=%s installer-ui=%s exp-utf8-layout=%s timezone=%s pkg-repo=%s\n",pt==0?"OK":"FAIL",ua==0?"OK":"FAIL",ps==0?"OK":"FAIL",sc==0?"OK":"FAIL",nf==0?"OK":"FAIL",nd==0?"OK":"FAIL",na==0?"OK":"FAIL",la==0?"OK":"FAIL",l1==0?"OK":"FAIL",l3==0?"OK":"FAIL",ex==0?"OK":"FAIL",cw==0?"OK":"FAIL",lc==0?"OK":"FAIL",ipc==0?"OK":"FAIL",im==0?"OK":"FAIL",vf==0?"OK":"FAIL",hp==0?"OK":"FAIL",mp==0?"OK":"FAIL",hd==0?"OK":"FAIL",ug==0?"OK":"FAIL",hs==0?"OK":"FAIL",ii==0?"OK":"FAIL",eu==0?"OK":"FAIL",tzr==0?"OK":"FAIL",rp==0?"OK":"FAIL");
+            sdk_serial_write("[ixpy] parser-raw-source\n"); int xp=ixpy_selftest();
+            if(xp==0)sdk_serial_write("[ixpy] parser-raw-source-ok\n");else sdk_serial_write("[ixpy] parser-raw-source-fail\n");
+            cprintf("posix test: paging=%s uaccess=%s vfs-posix=%s syscall-usercopy=%s process-fd=%s native-dir=%s native-cpl3=%s linux-l0=%s linux-descriptor=%s linux-session=%s linux-v22=%s linux-l1=%s linux-l3=%s exec=%s cpl3-wait=%s cpl3-signal=%s static-libc=%s pipe-ipc=%s image-bmp=%s vbe-fastpath=%s udp-parser=%s ntp-parser=%s http-parser=%s mp3-parser=%s hda-detect=%s uhd600-detect=%s hardware-status=%s installer-ui=%s init-runtime=%s exp-utf8-layout=%s timezone=%s tzif-parser=%s pkg-repo=%s ixpy-parser=%s\n",pt==0?"OK":"FAIL",ua==0?"OK":"FAIL",ps==0?"OK":"FAIL",sc==0?"OK":"FAIL",nf==0?"OK":"FAIL",nd==0?"OK":"FAIL",na==0?"OK":"FAIL",la==0?"OK":"FAIL",ld==0?"OK":"FAIL",ls==0?"OK":"FAIL",lv22==0?"OK":"FAIL",l1==0?"OK":"FAIL",l3==0?"OK":"FAIL",ex==0?"OK":"FAIL",cw==0?"OK":"FAIL",csig==0?"OK":"FAIL",lc==0?"OK":"FAIL",ipc==0?"OK":"FAIL",im==0?"OK":"FAIL",vf==0?"OK":"FAIL",udp==0?"OK":"FAIL",ntp==0?"OK":"FAIL",hp==0?"OK":"FAIL",mp==0?"OK":"FAIL",hd==0?"OK":"FAIL",ug==0?"OK":"FAIL",hs==0?"OK":"FAIL",ii==0?"OK":"FAIL",ir==0?"OK":"FAIL",eu==0?"OK":"FAIL",tzr==0?"OK":"FAIL",tzif==0?"OK":"FAIL",rp==0?"OK":"FAIL",xp==0?"OK":"FAIL");
         } else if(!kstrcmp(argv[1],"ring3")) {
             if(!session_is_privileged()){ C_ERR(); con_writeln("posix ring3: administrator privileges required"); C_NRM(); goto done; }
             C_WRN(); con_write("Type RING3 to enter destructive CPL 3 diagnostic: "); C_NRM();
@@ -2769,6 +2856,22 @@ void dispatch(char *line) {
     }
     /* ====== v10 NEW COMMANDS ====== */
     else if (!kstrcmp(cmd,"snake"))  game_snake();
+    else if (!kstrcmp(cmd,"flappy")) {
+        if(!exp_is_active()) con_writeln("flappy: open Exp with 'de', then run flappy in its Terminal.");
+        else if(exp_open_app(APP_FLAPPY,NULL)<0) con_writeln("flappy: no free Exp window slot.");
+    }
+    else if (!kstrcmp(cmd,"power")) {
+        if(!exp_is_active()) con_writeln("power: open Exp with 'de', then run power in its Terminal.");
+        else if(exp_open_app(APP_POWER,NULL)<0) con_writeln("power: no free Exp window slot.");
+    }
+    else if (!kstrcmp(cmd,"events")) {
+        if(!exp_is_active()) con_writeln("events: open Exp with 'de', then run events in its Terminal.");
+        else if(exp_open_app(APP_EVENTLOG,NULL)<0) con_writeln("events: no free Exp window slot.");
+    }
+    else if (!kstrcmp(cmd,"sysinfo")) {
+        if(!exp_is_active()) con_writeln("sysinfo: open Exp with 'de', then run sysinfo in its Terminal.");
+        else if(exp_open_app(APP_SYSINFO,NULL)<0) con_writeln("sysinfo: no free Exp window slot.");
+    }
     else if (!kstrcmp(cmd,"tetris")) game_tetris();
     else if (!kstrcmp(cmd,"pong"))   game_pong();
     else if (!kstrcmp(cmd,"osbuilder")||!kstrcmp(cmd,"mkos")) {
@@ -2876,7 +2979,7 @@ void dispatch(char *line) {
         const char *grps[][2] = {
             {"Files",   "ls ll la cat view less installer-log head tail file hd hexdump wc grep sort uniq cut tr tee dd"},
             {"Edit",    "write append touch rm cp mv mkdir rmdir tree find stat chmod chown ln"},
-            {"Apps",    "de  gui open <id>  nano [path]  notepad  calc|bc  files  editor  monitor  settings  cube  gears  glxgears  wallpaper [path]"},
+            {"Apps",    "de  gui open <id>  flappy|power|events|sysinfo (in Exp)  tetris  nano [path]  notepad  calc|bc  files  editor  monitor  settings  cube  gears  glxgears  wallpaper [path]"},
             {"Disk",    "lsblk swap df du mount [hda1] umount mkfs fsck [-y] hda1 sync live"},
             {"System",  "uname info hwinfo lscpu cpucompat gpu uptime mem free ps kill mouse dmesg date timezone which man modules"},
             {"Network", "ifconfig netstat net test|drivers ping arp route unm connect|disconnect|status|profiles|save untui"},
@@ -2968,6 +3071,24 @@ done:
  *  Kernel entry point
  * ================================================================================================================================================================================= */
 /* ====== ============-====== == ============ (uptime ====== HH:MM:SS) ======================================= */
+/* The graphical boot splash is intentionally small, self-contained and
+ * bounded. It draws only after TTF/VBE setup and before Exp enables its
+ * backbuffer, so it cannot be confused with idle or installer completion UI. */
+static void boot_graphical_splash(void){
+    if(!use_vbe||!vbe.active)return;
+    int w=(int)vbe.width,h=(int)vbe.height,bw=w>440?360:w-80,bx=(w-bw)/2,by=h-54;
+    const color32_t black=RGB(0x00,0x00,0x00),charcoal=RGB(0x18,0x18,0x18),line=RGB(0x86,0x86,0x86),title=RGB(0xF0,0xF0,0xF0),sub=RGB(0xB0,0xB0,0xB0),block=RGB(0xE0,0xE0,0xE0);
+    vbe_clear(black);
+    /* A restrained classic loading composition: title, divider and a single
+     * travelling indicator. It is native ATMKoala artwork, not a copied logo. */
+    vbe_fill_rect(w/2-190,h/2-74,380,2,charcoal);
+    ttf_render_string_percent(w/2-145,h/2-46,"atmkoala",title,black,220);
+    ttf_render_string_percent(w/2-82,h/2+12,"initialising desktop",sub,black,100);
+    vbe_fill_rect(bx,by,bw,10,charcoal);vbe_draw_rect(bx-1,by-1,bw+2,12,line);
+    sdk_serial_write("[boot] splash-shown\n");
+    for(int step=0;step<=120;step++){int x=bx+(bw-50)*step/120;vbe_fill_rect(bx,by,bw,10,charcoal);vbe_fill_rect(x,by+2,50,6,block);vbe_present();pit_sleep(1);}
+}
+
 static void update_statusbar(void) {
     if (use_vbe) return;
     uint32_t secs = sched_uptime_ticks() / 100;
@@ -3193,6 +3314,7 @@ void kernel_main(uint64_t mb_magic, uint64_t mbinfo_phys) {
         con_clear();
         terminal_print_logo();
     } else if (use_vbe && !boot_text_mode) {
+        boot_graphical_splash();
         exp_run();
         con_clear();
         terminal_print_logo();

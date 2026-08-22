@@ -132,6 +132,7 @@ static int valid_name(const char *name) {
     }
     return 1;
 }
+int user_name_is_valid(const char *name) { return valid_name(name); }
 
 static void make_salt(const char *name, uint32_t uid, char out[9]) {
     uint32_t h=2166136261U ^ g_salt_counter++;

@@ -12,6 +12,7 @@
 #include "vga.h"
 #include "idt.h"
 #include "pit.h"
+#include "unm.h"
 #include "hw_y116.h"
 #include <stdint.h>
 #include <stddef.h>
@@ -186,6 +187,47 @@ int net_recv(uint8_t *buf, uint16_t maxlen) {
     net.rx_packets++;
     net.rx_bytes += frame_len;
     return (int)frame_len;
+}
+
+/* Bounded UDP is intentionally a kernel-protocol helper, not a socket
+ * abstraction. It owns one net_recv poll at a time and drops unrelated frames. */
+static int net_udp_parse_frame(const uint8_t *frame,uint16_t frame_len,uint16_t want_port,uint8_t src_ip[4],uint16_t *src_port,void *payload,uint16_t cap,uint16_t *out_len){
+    if(!frame||frame_len<ETH_HLEN+20+8||!payload||!out_len)return -1;
+    const eth_header_t *eth=(const eth_header_t *)frame;
+    if(net_bswap16(eth->ethertype)!=0x0800)return -1;
+    const ip4_hdr_t *ip=(const ip4_hdr_t *)(frame+ETH_HLEN);int ihl=(ip->ver_ihl&15)*4;
+    if((ip->ver_ihl>>4)!=4||ihl<20||ip->protocol!=17||ETH_HLEN+ihl+8>frame_len)return -1;
+    uint16_t ip_len=net_bswap16(ip->total_len);if(ip_len<(uint16_t)(ihl+8)||ETH_HLEN+ip_len>frame_len)return -1;
+    const udp_hdr_t *udp=(const udp_hdr_t *)(frame+ETH_HLEN+ihl);uint16_t udp_len=net_bswap16(udp->length),body=(uint16_t)(udp_len-8);
+    if(udp_len<8||udp_len>(uint16_t)(ip_len-ihl)||net_bswap16(udp->dst_port)!=want_port||body>cap)return -1;
+    kmemcpy(payload,frame+ETH_HLEN+ihl+8,body);if(src_ip)kmemcpy(src_ip,ip->src_ip,4);if(src_port)*src_port=net_bswap16(udp->src_port);*out_len=body;return 0;
+}
+static int ip_nonzero(const uint8_t ip[4]){return ip&&((ip[0]|ip[1]|ip[2]|ip[3])!=0);}
+static int ip_nonzero32(const uint32_t ip[4]){return ip&&((ip[0]|ip[1]|ip[2]|ip[3])!=0);}
+static void net_udp_next_hop(const uint8_t dst[4],uint8_t out[4]){
+    uint8_t mask[4]={255,255,255,0},gateway[4]={0,0,0,0};
+    if(g_unm.active_profile>=0&&g_unm.active_profile<g_unm.profile_count){unm_profile_t *p=&g_unm.profiles[g_unm.active_profile];for(int i=0;i<4;i++){if(p->netmask[i])mask[i]=p->netmask[i];gateway[i]=p->gateway[i];}}
+    if(ip_nonzero(g_unm.leased_gw))for(int i=0;i<4;i++)gateway[i]=g_unm.leased_gw[i];
+    int local=1;for(int i=0;i<4;i++)if(((uint8_t)net.ip[i]&mask[i])!=(dst[i]&mask[i])){local=0;break;}
+    for(int i=0;i<4;i++)out[i]=(!local&&ip_nonzero(gateway))?gateway[i]:dst[i];
+}
+static int net_udp_resolve_mac(const uint8_t target[4],uint8_t mac[ETH_ALEN]){
+    if(net_arp_lookup(target,mac)==0)return 0;net_arp_request((uint8_t *)target);uint32_t started=pit_get_ticks();uint8_t frame[ETH_MAX];
+    while((uint32_t)(pit_get_ticks()-started)<100u){(void)net_recv(frame,sizeof(frame));if(net_arp_lookup(target,mac)==0)return 0;pit_sleep(2);}return -1;
+}
+int net_udp_sendto(const uint8_t dst_ip[4],uint16_t src_port,uint16_t dst_port,const void *payload,uint16_t len){
+    static uint8_t frame[ETH_HLEN+20+8+NET_UDP_PAYLOAD_MAX];static uint16_t packet_id=1;uint8_t next_hop[4],mac[ETH_ALEN];
+    if(!net.initialized||!dst_ip||!payload||!src_port||!dst_port||len>NET_UDP_PAYLOAD_MAX||!ip_nonzero32(net.ip))return -1;
+    net_udp_next_hop(dst_ip,next_hop);if(net_udp_resolve_mac(next_hop,mac)<0)return -1;
+    kmemset(frame,0,sizeof(frame));eth_header_t *eth=(eth_header_t *)frame;for(int i=0;i<ETH_ALEN;i++){eth->dst[i]=mac[i];eth->src[i]=net.mac[i];}eth->ethertype=net_bswap16(0x0800);
+    ip4_hdr_t *ip=(ip4_hdr_t *)(frame+ETH_HLEN);ip->ver_ihl=0x45;ip->ttl=64;ip->protocol=17;ip->id=net_bswap16(packet_id++);for(int i=0;i<4;i++){ip->src_ip[i]=(uint8_t)net.ip[i];ip->dst_ip[i]=dst_ip[i];}
+    udp_hdr_t *udp=(udp_hdr_t *)(frame+ETH_HLEN+20);udp->src_port=net_bswap16(src_port);udp->dst_port=net_bswap16(dst_port);udp->length=net_bswap16((uint16_t)(8+len));udp->checksum=0;kmemcpy(frame+ETH_HLEN+20+8,payload,len);
+    ip->total_len=net_bswap16((uint16_t)(20+8+len));ip->checksum=net_ip_checksum(ip,20);return net_send(frame,(uint16_t)(ETH_HLEN+20+8+len));
+}
+int net_udp_recvfrom(uint16_t dst_port,uint8_t src_ip[4],uint16_t *src_port,void *payload,uint16_t cap,uint16_t *out_len){uint8_t frame[ETH_MAX];int n=net_recv(frame,sizeof(frame));if(n<=0)return 0;return net_udp_parse_frame(frame,(uint16_t)n,dst_port,src_ip,src_port,payload,cap,out_len)==0?1:-1;}
+int net_udp_selftest(void){
+    uint8_t frame[ETH_HLEN+20+8+4],body[4]={0};uint16_t n=0,port=0;kmemset(frame,0,sizeof(frame));eth_header_t *eth=(eth_header_t *)frame;eth->ethertype=net_bswap16(0x0800);ip4_hdr_t *ip=(ip4_hdr_t *)(frame+ETH_HLEN);ip->ver_ihl=0x45;ip->protocol=17;ip->total_len=net_bswap16(32);ip->src_ip[0]=1;ip->src_ip[1]=2;ip->src_ip[2]=3;ip->src_ip[3]=4;udp_hdr_t *udp=(udp_hdr_t *)(frame+ETH_HLEN+20);udp->src_port=net_bswap16(123);udp->dst_port=net_bswap16(42424);udp->length=net_bswap16(12);frame[ETH_HLEN+28]=1;frame[ETH_HLEN+29]=2;frame[ETH_HLEN+30]=3;frame[ETH_HLEN+31]=4;
+    if(net_udp_parse_frame(frame,sizeof(frame),42424,NULL,&port,body,sizeof(body),&n)<0||port!=123||n!=4||body[3]!=4)return -1;udp->length=net_bswap16(7);return net_udp_parse_frame(frame,sizeof(frame),42424,NULL,&port,body,sizeof(body),&n)<0?0:-1;
 }
 
 /* ── IRQ handler ──────────────────────────────────────────── */

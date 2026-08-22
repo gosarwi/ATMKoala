@@ -187,7 +187,7 @@ int64_t native_pipe_write(task_t *task,int fd,const void *buf,uint64_t count,int
 }
 
 int native_pipe_selftest(void){
-    task_t task;int fds[2],fd;
+    static task_t task;int fds[2],fd;
     kmemset(&task,0,sizeof(task));
     for(int i=0;i<TASK_FD_MAX;i++){task.fd_map[i]=-1;task.socket_map[i]=-1;}
     native_pipe_task_init(&task);task.fd_table_ready=1;

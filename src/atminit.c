@@ -3,6 +3,7 @@
 #include "vfs.h"
 #include "catfs.h"
 #include "sched.h"
+#include "kmalloc.h"
 #include "net.h"
 #include "unm.h"
 #include "catfs_vfs.h"
@@ -293,6 +294,32 @@ const atm_service_info_t *atminit_service_find(const char *name) {
     return entry ? &entry->info : NULL;
 }
 int atminit_log_count(void) { return (int)g_log_count; }
+int atminit_kernel_log_count(void) { return kernel_log_count(); }
+const atm_kernel_log_entry_t *atminit_kernel_log_at(int index) { return kernel_log_at(index); }
+void atminit_note_app_launch(const char *name,const char *detail) {
+    if (!g_initialised || !name || !name[0]) return;
+    initlog("app",name,detail&&detail[0]?detail:"created");
+}
+const char *atminit_memory_pressure_name(atm_memory_pressure_t pressure) {
+    return pressure==ATM_MEMORY_CRITICAL?"critical":(pressure==ATM_MEMORY_WARN?"warn":"ok");
+}
+void atminit_memory_status(atm_memory_status_t *out) {
+    uint32_t used=heap_used_bytes(),freeb=heap_free_bytes(),total=used+freeb,percent=total?(used*100u)/total:0u;
+    if (!out) return;
+    out->heap_used=used;out->heap_free=freeb;out->task_resident=sched_total_resident_bytes();out->task_count=sched_task_count();out->heap_percent=(uint8_t)percent;
+    out->pressure=percent>=90u?ATM_MEMORY_CRITICAL:(percent>=75u?ATM_MEMORY_WARN:ATM_MEMORY_OK);
+}
+int atminit_selftest(void) {
+    int before=kernel_log_count();
+    atm_memory_status_t mem;
+    kprintf("[init] runtime-selftest\n");
+    int after=kernel_log_count();
+    const atm_kernel_log_entry_t *entry=kernel_log_at(after-1);
+    atminit_memory_status(&mem);
+    if(after!=before+1||!entry||!kstrstr(entry->text,"runtime-selftest"))return -1;
+    if(mem.heap_used+mem.heap_free==0||mem.heap_percent>100u||mem.pressure>ATM_MEMORY_CRITICAL)return -1;
+    return 0;
+}
 const atm_init_log_entry_t *atminit_log_at(int index) {
     if (index<0 || (uint32_t)index>=g_log_count) return NULL;
     return &g_logs[(g_log_head+ATM_INIT_LOG_MAX-g_log_count+(uint32_t)index)%ATM_INIT_LOG_MAX];

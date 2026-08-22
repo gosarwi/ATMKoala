@@ -32,6 +32,9 @@ typedef struct stat {
 int stat(const char *path,stat_t *st);
 int lstat(const char *path,stat_t *st);
 int fstat(int fd,stat_t *st);
+int fchmod(int fd,mode_t mode);
 int fstatat(int dirfd,const char *path,stat_t *st,int flags);
+/* This ABI currently accepts only AT_FDCWD. */
+int mkdirat(int dirfd,const char *path,mode_t mode);
 int chmod(const char *path,mode_t mode);
 #endif

@@ -50,7 +50,7 @@ int native_dir_close(task_t *task,int handle){
 }
 
 int native_dir_selftest(void){
-    task_t task;atm_posix_dirent_t ent;
+    static task_t task;atm_posix_dirent_t ent;
     kmemset(&task,0,sizeof(task));task.fd_table_ready=1;
     native_dir_task_init(&task);
     int handle=native_dir_open(&task,"/");
