@@ -38,6 +38,12 @@ const char *tzst_repo_url(void);
 int tzst_repo_set_url(const char *url);
 int tzst_repo_fetch_package(const char *pkg_name);
 int tzst_repo_selftest(void);
+/* Bounded installed-package metadata enumeration from the native registry.
+ * It lists package records only; it is not a dependency solver. */
+uint32_t tzst_installed_count(void);
+int tzst_installed_at(uint32_t index,char *name,uint32_t name_cap,char *version,uint32_t version_cap,char *arch,uint32_t arch_cap);
+/* Copies an optional installed ATPK Description field, or "-" when absent. */
+int tzst_installed_description_at(uint32_t index,char *description,uint32_t description_cap);
 int tzst_wrap_elf(const uint8_t *elf_data, uint32_t elf_size,
                   const char *name, const char *version,
                   uint8_t *out_buf, uint32_t out_sz);

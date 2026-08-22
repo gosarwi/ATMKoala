@@ -29,6 +29,8 @@ file_fmt_t fmt_detect(const uint8_t *buf, uint32_t size, const char *fn) {
         if (size>=8 && buf[0]==0x89 && buf[1]=='P' && buf[2]=='N' && buf[3]=='G' && buf[4]==0x0D && buf[5]==0x0A && buf[6]==0x1A && buf[7]==0x0A) return FMT_PNG;
         /* JPEG SOI */
         if (buf[0]==0xFF && buf[1]==0xD8 && buf[2]==0xFF) return FMT_JPEG;
+        /* Portable Pixmap binary P6; full header validation belongs to decoder. */
+        if (buf[0]=='P' && buf[1]=='6' && (buf[2]==' '||buf[2]=='\t'||buf[2]=='\r'||buf[2]=='\n')) return FMT_PPM;
         /* GZIP */
         if (buf[0]==0x1F && buf[1]==0x8B) return FMT_GZIP;
         /* MPEG Layer III: require a bounded multi-frame probe, not a filename. */
@@ -55,6 +57,7 @@ file_fmt_t fmt_detect(const uint8_t *buf, uint32_t size, const char *fn) {
     if (!kstrcmp(e,"bmp"))  return FMT_BMP;
     if (!kstrcmp(e,"png"))  return FMT_PNG;
     if (!kstrcmp(e,"jpg") || !kstrcmp(e,"jpeg")) return FMT_JPEG;
+    if (!kstrcmp(e,"ppm")) return FMT_PPM;
     if (!kstrcmp(e,"mp3")) return FMT_MP3;
 
     return FMT_TEXT;  /* default: try as text */
@@ -76,6 +79,7 @@ const char *fmt_name(file_fmt_t f) {
         case FMT_BMP:      return "BMP Image";
         case FMT_PNG:      return "PNG Image";
         case FMT_JPEG:     return "JPEG Image";
+        case FMT_PPM:      return "PPM P6 Image";
         case FMT_TAR:      return "TAR Archive";
         case FMT_GZIP:     return "GZip Archive";
         case FMT_MP3:      return "MPEG Audio Layer III (inspection only)";
@@ -94,6 +98,7 @@ const char *fmt_mime(file_fmt_t f) {
         case FMT_BMP:      return "image/bmp";
         case FMT_PNG:      return "image/png";
         case FMT_JPEG:     return "image/jpeg";
+        case FMT_PPM:      return "image/x-portable-pixmap";
         case FMT_TAR_ZST:  return "application/zstd";
         case FMT_TAR:      return "application/x-tar";
         case FMT_GZIP:     return "application/gzip";

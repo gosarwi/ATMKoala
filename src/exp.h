@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "image_decode.h"
+#include "partmgr.h"
 
 /* Sizes: v0.9 uses one stable coordinate system, physical VBE pixels at
  * 100%. The legacy scale symbols remain ABI-compatible but are immutable. */
@@ -62,7 +63,7 @@ typedef enum {
     APP_NONE=0, APP_TERMINAL, APP_FILES, APP_EDITOR, APP_NOTEPAD,
     APP_SYSMON, APP_SETTINGS, APP_VIEWER, APP_ABOUT, APP_CALCULATOR,
     APP_TASKS, APP_JOURNAL, APP_CLOCK, APP_CALENDAR, APP_TINYGL, APP_MINES, APP_SNAKE, APP_FLAPPY, APP_TETRIS, APP_PAINT,
-    APP_SYSINFO, APP_EVENTLOG, APP_POWER, APP_SCREENSHOTS,
+    APP_SYSINFO, APP_EVENTLOG, APP_POWER, APP_SCREENSHOTS, APP_PROCESSES, APP_MOUNTS, APP_NETWORK, APP_PACKAGES, APP_DIAGNOSTICS, APP_STORAGE, APP_HELP,
     APP_IMAGE_VIEWER, /* legacy internal compatibility ID */
     APP_ARCHIVEEX,
     APP_EXTERNAL=0x70,
@@ -188,7 +189,9 @@ typedef struct {
     /* Files */
     char       fm_path[128];
     fm_entry_t fm_ent[FM_MAX_ENTRIES];
-    int        fm_count, fm_sel, fm_scroll;
+    int        fm_count, fm_sel, fm_scroll, fm_details;
+    char       fm_search[32];
+    int        fm_search_len, fm_search_edit;
     char       fm_preview[512];
     char       fm_clip_path[128];
     int        fm_clip_move;
@@ -197,13 +200,34 @@ typedef struct {
     char       ed_path[128];
     char       ed_buf[8192];
     int        ed_len, ed_scroll;
-    int        ed_readonly, ed_cursor, ed_dirty;
+    int        ed_readonly, ed_cursor, ed_dirty, ed_close_confirm;
+    char       ed_query[32];
+    int        ed_query_len, ed_prompt; /* 0 none, 1 literal find, 2 goto line */
 
     /* Sysmon */
     sysmon_t   sysmon;
 
     /* Read-only Events viewer: 0=init/service ring, 1=kernel formatter ring. */
     int       log_mode, log_scroll;
+
+    /* Process Viewer exposes scheduler snapshots only; it does not provide
+     * task-control actions because Exp is not a process supervisor. */
+    int       proc_scroll;
+
+    /* Mount Manager: 0=no confirmation, 1=CatFS unmount pending. */
+    int       mount_action;
+
+    /* Network and package information panes: indices select only local rows. */
+    int       network_sel, package_scroll, package_sel;
+
+    /* Diagnostics Dashboard: results are valid only for explicitly run
+     * non-destructive in-kernel selftests in this window. */
+    int       diag_done, diag_rc[6], diag_export_count;
+
+    /* Read-only MBR/partition inspection cache, refreshed only explicitly. */
+    int       storage_drive, storage_result, help_page;
+    mbr_table_t storage_mbr;
+    char      storage_fs[PART_MAX_ENTRIES][12];
 
     /* Power menu: 0=none, 1=halt pending, 2=reboot pending. */
     int       power_action;

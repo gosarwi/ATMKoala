@@ -15,9 +15,38 @@ vbe_state_t vbe = {0};
 
 /* One reusable software surface for Exp.  Keeping it allocated avoids heap
  * churn when the desktop is closed and reopened. */
+/* The general heap is intentionally only 8 MiB, while a 1920×1080×32
+ * desktop surface is about 7.9 MiB before other allocations. Keep a dedicated
+ * BSS surface for the bootloader's adaptive preferred modes so Exp can present
+ * whole frames atomically instead of falling back to visible direct redraw.
+ * Ten MiB also tolerates modest firmware pitch padding. Larger unusual modes
+ * still fail safely into the existing direct-render path rather than consuming
+ * unbounded memory. */
+#define VBE_STATIC_BACKBUFFER_CAP (10u*1024u*1024u)
+static uint8_t vbe_static_backbuffer[VBE_STATIC_BACKBUFFER_CAP];
 static uint8_t *vbe_backbuffer = NULL;
 static uint32_t vbe_backbuffer_size = 0;
+static int vbe_backbuffer_static = 0;
 static int vbe_buffered = 0;
+
+static int vbe_framebuffer_sane(uint32_t width,uint32_t height,uint32_t pitch,uint8_t bpp){
+    uint32_t bytes_per_pixel=(bpp==32)?4u:((bpp==24)?3u:0u);
+    if(!bytes_per_pixel||width<320u||height<200u)return 0;
+    if(pitch<(uint64_t)width*bytes_per_pixel)return 0;
+    /* Prevent a corrupted Multiboot tag from overflowing row math. The
+     * platform path still owns mode selection; this only validates handoff. */
+    if((uint64_t)pitch*(uint64_t)height>0xFFFFFFFFu)return 0;
+    return 1;
+}
+
+static int vbe_desktop_geometry(uint32_t width,uint32_t height){return width>=VBE_DESKTOP_MIN_WIDTH&&height>=VBE_DESKTOP_MIN_HEIGHT;}
+int vbe_desktop_supported(void){return vbe.active&&vbe_desktop_geometry(vbe.width,vbe.height);}
+int vbe_geometry_selftest(void){
+    if(!vbe_framebuffer_sane(640,480,640*4u,32)||!vbe_framebuffer_sane(1920,1080,1920*4u,32)||!vbe_framebuffer_sane(800,600,800*3u,24))return -1;
+    if(vbe_framebuffer_sane(640,480,640*3u,32)||vbe_framebuffer_sane(640,480,640*4u,16))return -1;
+    if(!vbe_desktop_geometry(640,480)||!vbe_desktop_geometry(1920,1080)||vbe_desktop_geometry(639,480)||vbe_desktop_geometry(640,479))return -1;
+    return 0;
+}
 
 static uint8_t *vbe_draw_base(void) {
     return vbe_buffered && vbe_backbuffer ? vbe_backbuffer : (uint8_t *)vbe.fb;
@@ -25,12 +54,15 @@ static uint8_t *vbe_draw_base(void) {
 
 int vbe_double_buffer_enable(void) {
     if (!vbe.active || !vbe.pitch || !vbe.height) return -1;
-    uint32_t bytes=vbe.pitch*vbe.height;
+    uint64_t bytes64=(uint64_t)vbe.pitch*(uint64_t)vbe.height;
+    if(bytes64>0xFFFFFFFFu)return -1;uint32_t bytes=(uint32_t)bytes64;
     if (!vbe_backbuffer || vbe_backbuffer_size<bytes) {
-        uint8_t *buf=(uint8_t *)kmalloc(bytes);
+        uint8_t *buf=NULL;
+        if(bytes<=VBE_STATIC_BACKBUFFER_CAP){buf=vbe_static_backbuffer;vbe_backbuffer_static=1;}
+        else{buf=(uint8_t *)kmalloc(bytes);vbe_backbuffer_static=0;}
         if (!buf) return -1;
         vbe_backbuffer=buf;
-        vbe_backbuffer_size=bytes;
+        vbe_backbuffer_size=bytes<=VBE_STATIC_BACKBUFFER_CAP?VBE_STATIC_BACKBUFFER_CAP:bytes;
     }
     uint8_t *front=(uint8_t *)vbe.fb;
     kmemcpy(vbe_backbuffer,front,bytes);
@@ -38,9 +70,12 @@ int vbe_double_buffer_enable(void) {
     return 0;
 }
 
+int vbe_double_buffer_active(void){return vbe.active&&vbe_buffered&&vbe_backbuffer!=NULL;}
+int vbe_double_buffer_uses_static(void){return vbe_double_buffer_active()&&vbe_backbuffer_static;}
+
 void vbe_present(void) {
-    if (!vbe.active || !vbe_buffered || !vbe_backbuffer) return;
-    uint32_t bytes=vbe.pitch*vbe.height;
+    if (!vbe_double_buffer_active()) return;
+    uint64_t bytes64=(uint64_t)vbe.pitch*(uint64_t)vbe.height;if(bytes64>0xFFFFFFFFu)return;uint32_t bytes=(uint32_t)bytes64;
     uint8_t *front=(uint8_t *)vbe.fb;
     kmemcpy(front,vbe_backbuffer,bytes);
 }
@@ -162,7 +197,7 @@ static const uint8_t font8x16[][FONT_H] = {
  * ═══════════════════════════════════════════════════════════════ */
 int vbe_init(mb_fb_info_t *fi) {
     if (!fi || fi->type != 1) return -1;   /* need RGB framebuffer */
-    if (fi->bpp != 32 && fi->bpp != 24) return -1;
+    if (!vbe_framebuffer_sane(fi->width,fi->height,fi->pitch,fi->bpp)) return -1;
 
     /* Build the full 64-bit physical address. On systems with >=4GB RAM
      * (or where firmware places the LFB above the 4GB boundary) addr_hi
@@ -273,14 +308,14 @@ void vbe_clear(color32_t c) {
 
 int vbe_fastpath_selftest(void) {
     static uint32_t surface[32];
-    vbe_state_t saved=vbe;uint8_t *saved_back=vbe_backbuffer;uint32_t saved_back_size=vbe_backbuffer_size;int saved_buffered=vbe_buffered;
+    vbe_state_t saved=vbe;uint8_t *saved_back=vbe_backbuffer;uint32_t saved_back_size=vbe_backbuffer_size;int saved_back_static=vbe_backbuffer_static,saved_buffered=vbe_buffered;
     const color32_t first=RGB(0x12,0x34,0x56),last=RGB(0xA0,0xB0,0xC0);int rc=0;
     kmemset(surface,0,sizeof(surface));vbe.fb=surface;vbe.width=8;vbe.height=4;vbe.pitch=8u*4u;vbe.bpp=32;vbe.active=1;vbe_backbuffer=NULL;vbe_backbuffer_size=0;vbe_buffered=0;
     vbe_fill_rect(-1,1,4,2,first);
     for(int y=0;y<4;y++)for(int x=0;x<8;x++){uint32_t want=(y==1||y==2)&&x<3?first:0;if(surface[y*8+x]!=want)rc=-1;}
     vbe_fill_rect(6,3,4,4,last);
     if(surface[3*8+6]!=last||surface[3*8+7]!=last)rc=-1;
-    vbe=saved;vbe_backbuffer=saved_back;vbe_backbuffer_size=saved_back_size;vbe_buffered=saved_buffered;
+    vbe=saved;vbe_backbuffer=saved_back;vbe_backbuffer_size=saved_back_size;vbe_backbuffer_static=saved_back_static;vbe_buffered=saved_buffered;
     return rc;
 }
 

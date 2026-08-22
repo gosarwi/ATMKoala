@@ -103,7 +103,7 @@ static int install_atpk(const tzst_pkg_t *pkg){
     /* Commit. Existing files were prohibited by preflight. If a rename fails,
      * delete both staged and already committed files, restoring pre-install state. */
     for(i=0;i<count;i++)if(vfs_rename(stages[i],dests[i])<0){for(uint32_t j=0;j<count;j++)vfs_unlink(stages[j]);for(uint32_t j=0;j<i;j++)vfs_unlink(dests[j]);return -20;}
-    cfg_set(&g_pkgcfg,pkg->package_name,"format","atpk-1");cfg_set(&g_pkgcfg,pkg->package_name,"version",pkg->version);cfg_set(&g_pkgcfg,pkg->package_name,"architecture",pkg->architecture);cfg_set(&g_pkgcfg,pkg->package_name,"installed","yes");cfg_save(&g_pkgcfg,CFG_ROOT "/packages.conf");terminal_write("atpk: installed ");terminal_writeln(pkg->package_name);return 0;
+    cfg_set(&g_pkgcfg,pkg->package_name,"format","atpk-1");cfg_set(&g_pkgcfg,pkg->package_name,"version",pkg->version);cfg_set(&g_pkgcfg,pkg->package_name,"architecture",pkg->architecture);cfg_set(&g_pkgcfg,pkg->package_name,"description",pkg->description[0]?pkg->description:"-");cfg_set(&g_pkgcfg,pkg->package_name,"installed","yes");cfg_save(&g_pkgcfg,CFG_ROOT "/packages.conf");terminal_write("atpk: installed ");terminal_writeln(pkg->package_name);return 0;
 }
 
 int tzst_install(const tzst_pkg_t *pkg){if(!pkg||!pkg->tar)return -1;return pkg->atpk?install_atpk(pkg):install_legacy(pkg);}
@@ -167,6 +167,9 @@ int tzst_repo_fetch_package(const char *pkg_name){
     if(repo_build_url(base,pkg_name,url,sizeof(url))<0)return -1;
     return tzst_fetch_install_http(url);
 }
+uint32_t tzst_installed_count(void){uint32_t count=0;for(int i=0;i<g_pkgcfg.count&&i<CFG_MAX_SECTIONS;i++){const char *installed=cfg_get(&g_pkgcfg,g_pkgcfg.sections[i].name,"installed");if(installed&&!kstrcmp(installed,"yes"))count++;}return count;}
+int tzst_installed_at(uint32_t index,char *name,uint32_t name_cap,char *version,uint32_t version_cap,char *arch,uint32_t arch_cap){if(!name||!version||!arch||!name_cap||!version_cap||!arch_cap)return -1;uint32_t seen=0;for(int i=0;i<g_pkgcfg.count&&i<CFG_MAX_SECTIONS;i++){const char *section=g_pkgcfg.sections[i].name;const char *installed=cfg_get(&g_pkgcfg,section,"installed");if(!installed||kstrcmp(installed,"yes"))continue;if(seen++!=index)continue;const char *v=cfg_get(&g_pkgcfg,section,"version");const char *a=cfg_get(&g_pkgcfg,section,"architecture");kstrncpy(name,section,name_cap-1);name[name_cap-1]=0;kstrncpy(version,v?v:"-",version_cap-1);version[version_cap-1]=0;kstrncpy(arch,a?a:"-",arch_cap-1);arch[arch_cap-1]=0;return 0;}return -1;}
+int tzst_installed_description_at(uint32_t index,char *description,uint32_t description_cap){if(!description||!description_cap)return -1;uint32_t seen=0;for(int i=0;i<g_pkgcfg.count&&i<CFG_MAX_SECTIONS;i++){const char *section=g_pkgcfg.sections[i].name;const char *installed=cfg_get(&g_pkgcfg,section,"installed");if(!installed||kstrcmp(installed,"yes"))continue;if(seen++!=index)continue;const char *d=cfg_get(&g_pkgcfg,section,"description");kstrncpy(description,d&&d[0]?d:"-",description_cap-1);description[description_cap-1]=0;return 0;}return -1;}
 int tzst_repo_selftest(void){
     char url[ATM_HTTP_URL_MAX+1];
     if(!valid_repo_url("http://127.0.0.1:8080/atpk")||valid_repo_url("https://repo.invalid")||

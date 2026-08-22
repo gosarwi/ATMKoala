@@ -30,6 +30,7 @@ typedef enum {
     FMT_BMP,           /* BMP image */
     FMT_PNG,           /* PNG image */
     FMT_JPEG,          /* JPEG image */
+    FMT_PPM,           /* binary PPM P6 image */
     FMT_TAR,           /* TAR archive */
     FMT_GZIP,          /* .gz */
     FMT_MP3,           /* MPEG Audio Layer III stream */

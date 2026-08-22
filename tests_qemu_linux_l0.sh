@@ -82,6 +82,14 @@ grep -Fq '[vbe] fastpath-ok' "$SERIAL" || {
   echo 'VBE fast-path regression did not report serial [vbe] fastpath-ok' >&2
   exit 1
 }
+grep -Fq '[vbe] geometry-ok' "$SERIAL" || {
+  echo 'VBE geometry regression did not report serial [vbe] geometry-ok' >&2
+  exit 1
+}
+grep -Fq '[vbe] exp-backbuffer-static' "$SERIAL" || {
+  echo 'Adaptive Exp path did not report reserved static full-frame backbuffer' >&2
+  exit 1
+}
 grep -Fq '[mouse] packet-ok' "$SERIAL" || {
   echo 'Mouse packet validation did not report serial [mouse] packet-ok' >&2
   exit 1

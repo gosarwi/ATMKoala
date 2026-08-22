@@ -26,6 +26,11 @@
 #include "gui_demo.h"
 #include "atminit.h"
 #include "catfs_vfs.h"
+#include "ext2.h"
+#include "partmgr.h"
+#include "unm.h"
+#include "ntp.h"
+#include "tzif.h"
 #include <stdint.h>
 #include <stddef.h>
 
@@ -65,6 +70,7 @@ static void exp_theme_set(exp_theme_t id,int save){
 static const char *exp_theme_name(void){return exp_theme==EXP_THEME_WHITE?"White Paper":"Dark Mono";}
 static tgl_context_t tinygl_ctx;
 static int inside(int px,int py,int x,int y,int w,int h);
+static void win_close(int idx);
 static int flappy_state_selftest(void);
 static int sysinfo_state_selftest(void);
 static int events_state_selftest(void);
@@ -76,6 +82,7 @@ static void saver_begin(void);
 static int screenshot_state_selftest(void);
 static int wallpaper_state_selftest(void);
 static int clock_zone_state_selftest(void);
+static int fm_name_contains(const char *name,const char *needle);
 static void gui_context(exp_gui_context_t *ctx,exp_win_t *w){ctx->window_id=w->id;ctx->x=w->x+2;ctx->y=w->y+DE_TITLEBAR_H+1;ctx->width=w->w-4;ctx->height=w->h-DE_TITLEBAR_H-3;ctx->scale_percent=exp_ui_scale_pct;ctx->fg=C_TEXT;ctx->bg=C_BASE;ctx->state=(w->ext_slot>=0&&w->ext_slot<gui_app_count)?gui_apps[w->ext_slot].state:NULL;}
 void exp_gui_fill(exp_gui_context_t *ctx,int x,int y,int w,int h,color32_t c){if(ctx)vbe_fill_rect(EXP_SCALE(ctx->x+x),EXP_SCALE(ctx->y+y),EXP_SCALE(w),EXP_SCALE(h),c);}
 void exp_gui_frame(exp_gui_context_t *ctx,int x,int y,int w,int h,color32_t c){if(ctx)vbe_draw_rect(EXP_SCALE(ctx->x+x),EXP_SCALE(ctx->y+y),EXP_SCALE(w),EXP_SCALE(h),c);}
@@ -102,6 +109,10 @@ int exp_text_layout_selftest(void){
     if(glyphs!=7||bytes!=14)return -1;
     if(exp_text_width(russian)!=glyphs*ttf_glyph_width())return -1;
     if(flappy_state_selftest()<0||sysinfo_state_selftest()<0||events_state_selftest()<0||paint_state_selftest()<0||tetris_state_selftest()<0||power_state_selftest()<0||saver_state_selftest()<0||screenshot_state_selftest()<0||wallpaper_state_selftest()<0||clock_zone_state_selftest()<0)return -1;
+    sched_task_info_t task;if(sched_task_info(-1,&task)>=0||g_unm.profile_count<0||g_unm.profile_count>UNM_MAX_PROFILES)return -1;
+    static const uint8_t ppm_magic[]={'P','6','\n','1',' ','1','\n','2','5','5','\n',0,0,0};
+    if(tzst_installed_at(0,NULL,0,NULL,0,NULL,0)!=-1||tzst_installed_description_at(0,NULL,0)!=-1)return -1;
+    if(!fm_name_contains("atmkoala-01.ppm","koala")||fm_name_contains("atmkoala-01.ppm","jpeg")||fmt_detect(ppm_magic,sizeof(ppm_magic),"fixture.ppm")!=FMT_PPM)return -1;
     return 0;
 }
 #define CX(w) ((w)->x+2)
@@ -191,7 +202,7 @@ static void draw_app_icon(app_id_t app,int x,int y,int size,color32_t fg,color32
         R(x+4*u,y+2*u,8*u,12*u,C_TEXT);BOX(x+4*u,y+2*u,8*u,12*u,fg);
         for(i=0;i<3;i++)icon_line(x+6*u,y+(5+i*2)*u,5*u,u,fg);
         if(app==APP_NOTEPAD)icon_line(x+10*u,y+11*u,3*u,2*u,C_PEACH);
-    } else if(app==APP_SYSMON||app==APP_SYSINFO){
+    } else if(app==APP_SYSMON||app==APP_SYSINFO||app==APP_PROCESSES){
         BOX(x+2*u,y+2*u,12*u,12*u,fg);icon_line(x+4*u,y+10*u,2*u,2*u,fg);icon_line(x+6*u,y+7*u,2*u,5*u,fg);icon_line(x+8*u,y+5*u,2*u,7*u,fg);icon_line(x+10*u,y+8*u,2*u,4*u,fg);
     } else if(app==APP_POWER){
         BOX(x+4*u,y+2*u,8*u,11*u,fg);R(x+7*u,y+2*u,2*u,6*u,bg);R(x+7*u,y+7*u,2*u,5*u,fg);
@@ -769,7 +780,12 @@ static void draw_files(exp_win_t *w){
             T(px2+4,py2,sz2,C_SUBTEXT,C_MANTLE); py2+=16;
         }
         py2+=8;
-        if(w->fm_preview[0]&&!e->is_dir){
+        if(w->fm_details){
+            char fp[128],line[160],mode[10];kstrcpy(fp,w->fm_path);if(fp[kstrlen(fp)-1]!='/')kstrcat(fp,"/");kstrcat(fp,e->name);int fl=(int)kstrlen(fp);if(fl>1&&fp[fl-1]=='/')fp[fl-1]=0;vfs_stat_t st;int have=vfs_stat(fp,&st)==0;
+            T(px2+4,py2,"Read-only properties",C_LAVENDER,C_MANTLE);py2+=18;TC(px2+4,py2,fp,C_SUBTEXT,C_MANTLE,rw2-8);py2+=18;
+            ksnprintf(line,sizeof(line),"Kind: %s",e->is_dir?"directory":fmt_name(fmt_detect(NULL,0,fp)));T(px2+4,py2,line,C_TEXT,C_MANTLE);py2+=16;
+            if(have){for(int mi=0;mi<9;mi++){uint32_t bit=1u<<(8-mi);mode[mi]=(st.st_mode&bit)?"rwx"[mi%3]:'-';}mode[9]=0;ksnprintf(line,sizeof(line),"Size: %u B  inode: %u",st.size,st.inode);T(px2+4,py2,line,C_SUBTEXT,C_MANTLE);py2+=16;ksnprintf(line,sizeof(line),"Mode: %s  links: %u",mode,st.st_nlink);T(px2+4,py2,line,C_SUBTEXT,C_MANTLE);py2+=16;ksnprintf(line,sizeof(line),"Owner: %u:%u",st.st_uid,st.st_gid);T(px2+4,py2,line,C_SUBTEXT,C_MANTLE);}else T(px2+4,py2,"VFS metadata unavailable",C_RED,C_MANTLE);
+        } else if(w->fm_preview[0]&&!e->is_dir){
             T(px2+4,py2,"---",C_SURFACE2,C_MANTLE); py2+=12;
             const char *pp=w->fm_preview; int plines=0;
             int mpl=(ch-(py2-cy))/13; if(mpl<0)mpl=0;
@@ -791,7 +807,7 @@ static void draw_files(exp_win_t *w){
     }
     HL(cx,cy+ch-16,cw2,C_SURFACE0);
     R(cx,cy+ch-15,cw2,15,C_MANTLE);
-    T(cx+4,cy+ch-14,"Enter=open  N=new folder  T=trash  R=trash  Bksp=up",C_SUBTEXT,C_MANTLE);
+    if(w->fm_search_edit){char findline[64];ksnprintf(findline,sizeof(findline),"Find filename: %s_  Enter next  Esc cancel",w->fm_search);T(cx+4,cy+ch-14,findline,C_YELLOW,C_MANTLE);}else T(cx+4,cy+ch-14,"Enter=open  F=find  I=properties  N=new folder  T=trash  R=trash",C_SUBTEXT,C_MANTLE);
 }
 
 static int fm_selected_path(exp_win_t *w,char out[128]){
@@ -824,9 +840,12 @@ static void fm_new_folder(exp_win_t *w){
 }
 static int fm_clip_target(exp_win_t *w,char out[128]){if(!w||!w->fm_clip_path[0])return -1;const char *name=w->fm_clip_path,*p=name;while(*p){if(*p=='/')name=p+1;p++;}if(!name[0])return -1;kstrcpy(out,w->fm_path);if(out[kstrlen(out)-1]!='/')kstrcat(out,"/");if(kstrlen(out)+kstrlen(name)>=128)return -1;kstrcat(out,name);return kstrcmp(out,w->fm_clip_path)==0?-1:0;}
 static void fm_clip_selected(exp_win_t *w,int move){char src[128];vfs_stat_t st;if(fm_selected_path(w,src)<0||vfs_stat(src,&st)<0||!S_ISREG(st.st_mode)){exp_notify("Clipboard supports regular files only",C_RED);return;}kstrcpy(w->fm_clip_path,src);w->fm_clip_move=move;exp_notify(move?"Move source selected; open destination and press P":"Copy source selected; open destination and press P",C_GREEN);}
+static int fm_name_contains(const char *name,const char *needle){if(!name||!needle||!needle[0])return 0;for(int i=0;name[i];i++){int j=0;while(needle[j]&&name[i+j]==needle[j])j++;if(!needle[j])return 1;}return 0;}
+static void fm_find_next(exp_win_t *w){if(!w||!w->fm_search[0]||w->fm_count<=0){exp_notify("Enter a filename fragment",C_YELLOW);return;}int start=w->fm_sel+1;if(start>=w->fm_count)start=0;for(int step=0;step<w->fm_count;step++){int i=(start+step)%w->fm_count;if(fm_name_contains(w->fm_ent[i].name,w->fm_search)){w->fm_sel=i;int mr=CH(w)/17;if(mr<1)mr=1;if(w->fm_sel<w->fm_scroll)w->fm_scroll=w->fm_sel;if(w->fm_sel>=w->fm_scroll+mr)w->fm_scroll=w->fm_sel-mr+1;fm_preview(w);return;}}exp_notify("No filename match in this folder",C_YELLOW);}
 static void fm_paste_clip(exp_win_t *w){char dst[128];vfs_stat_t st;if(!w->fm_clip_path[0]||fm_clip_target(w,dst)<0){exp_notify("Open another folder before paste",C_RED);return;}if(vfs_stat(dst,&st)==0){exp_notify("Paste refuses to overwrite existing file",C_RED);return;}if(vfs_stat(w->fm_clip_path,&st)<0||!S_ISREG(st.st_mode)||st.st_size>262144u){exp_notify("Paste supports regular files up to 256 KiB",C_RED);return;}if(w->fm_clip_move){if(vfs_rename(w->fm_clip_path,dst)<0){exp_notify("Move denied or cross-mount failed",C_RED);return;}w->fm_clip_path[0]=0;exp_notify("Moved file",C_GREEN);fm_load(w);return;}int in=vfs_open(w->fm_clip_path,O_RDONLY,0),out=-1;if(in<0||(out=vfs_open(dst,O_WRONLY|O_CREAT|O_EXCL,0644))<0){if(in>=0)vfs_close(in);exp_notify("Cannot create paste target",C_RED);return;}uint8_t buf[512];int bad=0;for(;;){int n=vfs_read(in,buf,sizeof(buf));if(n<0){bad=1;break;}if(n==0)break;if(vfs_write(out,buf,(size_t)n)!=n){bad=1;break;}}vfs_close(in);vfs_close(out);if(bad){(void)vfs_unlink(dst);exp_notify("Copy failed; partial file removed",C_RED);return;}exp_notify("Copied file",C_GREEN);fm_load(w);}
 
 static void fm_key(exp_win_t *w, int k){
+    if(w->fm_search_edit){if(k==KEY_ESC){w->fm_search_edit=0;return;}if(k=='\n'||k=='\r'){w->fm_search_edit=0;fm_find_next(w);return;}if(k=='\b'||k==127){if(w->fm_search_len>0)w->fm_search[--w->fm_search_len]=0;return;}if(k>=0x20&&k<=0x7E&&w->fm_search_len<(int)sizeof(w->fm_search)-1){w->fm_search[w->fm_search_len++]=(char)k;w->fm_search[w->fm_search_len]=0;}return;}
     int mr=CH(w)/17;
     if(k==KEY_UP&&w->fm_sel>0){
         w->fm_sel--;
@@ -882,6 +901,8 @@ static void fm_key(exp_win_t *w, int k){
     if(k=='p'||k=='P'){fm_paste_clip(w);return;}
     if(k=='t'||k=='T'){fm_trash_selected(w);return;}
     if(k=='r'||k=='R'){fm_open_trash(w);return;}
+    if(k=='f'||k=='F'){w->fm_search[0]=0;w->fm_search_len=0;w->fm_search_edit=1;return;}
+    if(k=='i'||k=='I'){w->fm_details=!w->fm_details;return;}
     if(k=='\b'){
         char *last=w->fm_path, *p=w->fm_path;
         while(*p){if(*p=='/')last=p;p++;}
@@ -939,7 +960,7 @@ static void image_viewer_load(exp_win_t *w,const char *path){
 static void draw_image_viewer(exp_win_t *w){
     int cx=CX(w),cy=CY(w),cw2=CW(w),ch=CH(w);R(cx,cy,cw2,ch,C_BASE);R(cx,cy,cw2,23,C_MANTLE);
     T(cx+8,cy+5,w->image_path[0]?w->image_path:"No image",C_TEXT,C_MANTLE);
-    if(!w->image.rgba){T(cx+12,cy+44,"Image preview unavailable",C_RED,C_BASE);T(cx+12,cy+64,w->image.error[0]?w->image.error:"Select a PNG, JPEG or BMP file in Files.",C_SUBTEXT,C_BASE);return;}
+    if(!w->image.rgba){T(cx+12,cy+44,"Image preview unavailable",C_RED,C_BASE);T(cx+12,cy+64,w->image.error[0]?w->image.error:"Select a PNG, JPEG, BMP or PPM P6 file in Files.",C_SUBTEXT,C_BASE);return;}
     int vx=EXP_SCALE(cx+8),vy=EXP_SCALE(cy+30),vw=EXP_SCALE(cw2-16),vh=EXP_SCALE(ch-58);if(vw<1||vh<1)return;
     for(int yy=0;yy<vh;yy+=8)for(int xx=0;xx<vw;xx+=8)vbe_fill_rect(vx+xx,vy+yy,(xx+8<vw)?8:vw-xx,(yy+8<vh)?8:vh-yy,((xx/8+yy/8)&1)?RGB(0x31,0x31,0x31):RGB(0x22,0x22,0x22));
     /* image_zoom is a percentage of the proportional fit (0 = fit), rather
@@ -1042,6 +1063,29 @@ static void draw_eventlog(exp_win_t *w){
 }
 static int sysinfo_state_selftest(void){sdk_cpuid_t cpu;sdk_meminfo_t mi;sdk_cpuid(&cpu);sdk_meminfo(&mi);return cpu.vendor[0]&&cpu.vendor[12]==0?0:-1;}
 static int events_state_selftest(void){return atminit_log_count()>=0&&atminit_kernel_log_count()>=0?0:-1;}
+static const char *proc_state_name(task_state_t state){switch(state){case TASK_READY:return "ready";case TASK_RUNNING:return "running";case TASK_BLOCKED:return "blocked";case TASK_ZOMBIE:return "zombie";default:return "unused";}}
+static void draw_processes(exp_win_t *w){int cx=CX(w),cy=CY(w),cw2=CW(w),ch=CH(w),rows=(ch-58)/16;if(rows<1)rows=1;int total=0;for(int i=0;i<TASK_MAX;i++){sched_task_info_t info;if(sched_task_info(i,&info)>=0)total++;}int max_scroll=total>rows?total-rows:0;if(w->proc_scroll<0)w->proc_scroll=0;if(w->proc_scroll>max_scroll)w->proc_scroll=max_scroll;R(cx,cy,cw2,ch,C_BASE);R(cx,cy,cw2,24,C_MANTLE);T(cx+10,cy+5,"PROCESS VIEWER",C_TEXT,C_MANTLE);char hdr[96];ksnprintf(hdr,sizeof(hdr),"%u scheduler task%s",(uint32_t)total,total==1?"":"s");T(cx+158,cy+5,hdr,C_LAVENDER,C_MANTLE);T(cx+10,cy+32,"PID  PPID STATE    PRI CPUtk MEMB   RD     WR     NAME",C_SUBTEXT,C_BASE);int seen=0,row=0;char line[160];for(int i=0;i<TASK_MAX&&row<rows;i++){sched_task_info_t info;if(sched_task_info(i,&info)<0)continue;if(seen++<w->proc_scroll)continue;ksnprintf(line,sizeof(line),"%-4u %-4u %-8s %-3u %-5u %-6u %-6u %-6u %.18s",info.pid,info.ppid,proc_state_name(info.state),info.priority,info.cpu_ticks,(uint32_t)info.resident_bytes,(uint32_t)info.io_read_bytes,(uint32_t)info.io_write_bytes,info.name);T(cx+10,cy+48+row*16, line,info.state==TASK_RUNNING?C_GREEN:C_TEXT,C_BASE);row++;}T(cx+10,cy+ch-20,"Up/Down scroll  |  Scheduler counters are not RSS  |  Read-only: no task termination control",C_OVERLAY0,C_BASE);}
+static void processes_key(exp_win_t *w,int k){if(k==KEY_UP&&w->proc_scroll>0)w->proc_scroll--;else if(k==KEY_DOWN)w->proc_scroll++;else if(k==KEY_PGUP){w->proc_scroll-=6;if(w->proc_scroll<0)w->proc_scroll=0;}else if(k==KEY_PGDN)w->proc_scroll+=6;}
+static void draw_mounts(exp_win_t *w){int cx=CX(w),cy=CY(w),cw2=CW(w),ch=CH(w),y=cy+14;char line[160];R(cx,cy,cw2,ch,C_BASE);T(cx+12,y,"MOUNT MANAGER",C_LAVENDER,C_BASE);y+=24;R(cx+10,y,cw2-20,58,C_SURFACE0);BOX(cx+10,y,cw2-20,58,catfs_vfs_is_mounted()?C_GREEN:C_YELLOW);T(cx+20,y+10,"CatFS persistent data",C_TEXT,C_SURFACE0);ksnprintf(line,sizeof(line),"/data: %s",catfs_vfs_is_mounted()?"mounted":"not mounted");T(cx+20,y+30,line,C_SUBTEXT,C_SURFACE0);y+=70;R(cx+10,y,cw2-20,74,C_SURFACE0);BOX(cx+10,y,cw2-20,74,ext2.mounted?C_BLUE:C_SURFACE1);T(cx+20,y+10,"Ext2 diagnostic volume",C_TEXT,C_SURFACE0);if(ext2.mounted){ksnprintf(line,sizeof(line),"drive %d partition %d  %s  %s",ext2.drive,ext2.part,ext2.volume_name[0]?ext2.volume_name:"unnamed",ext2.write_enabled?"guarded direct-write enabled":"read-only");T(cx+20,y+30,line,C_SUBTEXT,C_SURFACE0);ksnprintf(line,sizeof(line),"free blocks %u  free inodes %u",ext2.free_blocks,ext2.free_inodes);T(cx+20,y+48,line,C_SUBTEXT,C_SURFACE0);}else T(cx+20,y+30,"not mounted — use terminal: ext2 mount <drive> <partition>",C_SUBTEXT,C_SURFACE0);y+=90;if(w->mount_action==1)T(cx+14,y,"Confirm CatFS unmount: Enter executes, Esc cancels.",C_YELLOW,C_BASE);else if(w->mount_action==2)T(cx+14,y,"Confirm Ext2 unmount: Enter executes, Esc cancels.",C_YELLOW,C_BASE);else{T(cx+14,y,"M mount CatFS  |  U unmount CatFS  |  X unmount Ext2",C_TEXT,C_BASE);T(cx+14,y+20,"Unmount is explicit; mounting Ext2 remains terminal-selected to avoid guessing a disk/partition.",C_OVERLAY0,C_BASE);}}
+static void mountmgr_key(exp_win_t *w,int k){if(k==KEY_ESC){w->mount_action=0;return;}if(w->mount_action){if(k=='\n'||k=='\r'){int rc=w->mount_action==1?catfs_vfs_unmount():ext2_unmount();exp_notify(rc<0?"Unmount failed":"Unmount completed",rc<0?C_RED:C_GREEN);w->mount_action=0;}return;}if(k=='m'||k=='M'){int rc=catfs_vfs_is_mounted()?0:catfs_vfs_mount("/data");exp_notify(rc<0?"CatFS mount failed":"CatFS mounted at /data",rc<0?C_RED:C_GREEN);}else if((k=='u'||k=='U')&&catfs_vfs_is_mounted())w->mount_action=1;else if((k=='x'||k=='X')&&ext2.mounted)w->mount_action=2;}
+static const char *unm_state_text(unm_state_t s){return s==UNM_STATE_UP?"up":(s==UNM_STATE_CONNECTING?"connecting":(s==UNM_STATE_FAILED?"failed":"down"));}
+static const char *unm_mode_text(unm_mode_t m){return m==UNM_MODE_DHCP?"DHCP":(m==UNM_MODE_STATIC?"Static":"None");}
+static void draw_network(exp_win_t *w){int cx=CX(w),cy=CY(w),cw2=CW(w),ch=CH(w),y=cy+12;char line[160],ip[20],gw[20],dns[20];R(cx,cy,cw2,ch,C_BASE);T(cx+12,y,"NETWORK PROFILES",C_LAVENDER,C_BASE);ksnprintf(line,sizeof(line),"State: %s  |  profiles: %d",unm_state_text(g_unm.state),g_unm.profile_count);T(cx+230,y,line,C_TEXT,C_BASE);y+=24;if(w->network_sel<0)w->network_sel=0;if(w->network_sel>=g_unm.profile_count)w->network_sel=g_unm.profile_count?g_unm.profile_count-1:0;for(int i=0;i<g_unm.profile_count&&y<cy+ch-50;i++){unm_profile_t *p=&g_unm.profiles[i];unm_ip_str(p->ip,ip,sizeof(ip));unm_ip_str(p->gateway,gw,sizeof(gw));unm_ip_str(p->dns,dns,sizeof(dns));color32_t bg=i==w->network_sel?C_SURFACE1:C_MANTLE;R(cx+10,y,cw2-20,36,bg);BOX(cx+10,y,cw2-20,36,i==w->network_sel?C_BLUE:C_SURFACE1);ksnprintf(line,sizeof(line),"%c %s  [%s]  IP %s  GW %s  DNS %s",i==g_unm.active_profile?'*':' ',p->name[0]?p->name:"unnamed",unm_mode_text(p->mode),ip,gw,dns);TC(cx+18,y+5,line,i==w->network_sel?C_TEXT:C_SUBTEXT,bg,cw2-36);y+=38;}if(g_unm.profile_count==0)T(cx+14,y,"No saved profile. Use terminal: net dhcp or net static ...",C_SUBTEXT,C_BASE);T(cx+12,cy+ch-22,"Up/Down select  |  A activate+save  |  C connect  |  D disconnect (manual, bounded)",C_OVERLAY0,C_BASE);}
+static void network_key(exp_win_t *w,int k){if(k==KEY_UP&&w->network_sel>0)w->network_sel--;else if(k==KEY_DOWN&&w->network_sel+1<g_unm.profile_count)w->network_sel++;else if((k=='a'||k=='A')&&w->network_sel>=0&&w->network_sel<g_unm.profile_count){int rc=unm_profile_set_active(w->network_sel);if(rc==0)unm_save_profile();exp_notify(rc==0?"Network profile activated":"Profile activation failed",rc==0?C_GREEN:C_RED);}else if(k=='c'||k=='C'){int rc=unm_connect();exp_notify(rc==0?"Network connected":"Network connect failed",rc==0?C_GREEN:C_RED);}else if(k=='d'||k=='D'){unm_disconnect();exp_notify("Network disconnected",C_YELLOW);}}
+static void draw_packages(exp_win_t *w){int cx=CX(w),cy=CY(w),cw2=CW(w),ch=CH(w),y=cy+12;char line[160],name[64],ver[32],arch[24],desc[96];uint32_t total=tzst_installed_count();R(cx,cy,cw2,ch,C_BASE);T(cx+12,y,"PACKAGE DETAILS",C_LAVENDER,C_BASE);y+=22;ksnprintf(line,sizeof(line),"Repository: %s",tzst_repo_url()?tzst_repo_url():"not configured");TC(cx+12,y,line,C_TEXT,C_BASE,cw2-24);y+=20;ksnprintf(line,sizeof(line),"Installed registry records: %u",total);T(cx+12,y,line,C_SUBTEXT,C_BASE);y+=20;T(cx+12,y,"NAME                         VERSION          ARCH",C_SUBTEXT,C_BASE);y+=18;int rows=(ch-94)/16;if(rows<1)rows=1;int max_scroll=total>(uint32_t)rows?(int)total-rows:0;if(w->package_scroll<0)w->package_scroll=0;if(w->package_scroll>max_scroll)w->package_scroll=max_scroll;for(int row=0;row<rows&&(uint32_t)(w->package_scroll+row)<total;row++){if(tzst_installed_at((uint32_t)(w->package_scroll+row),name,sizeof(name),ver,sizeof(ver),arch,sizeof(arch))<0)continue;ksnprintf(line,sizeof(line),"%-28s %-16s %s",name,ver,arch);T(cx+16,y+row*16,line,C_TEXT,C_BASE);}if(total&&tzst_installed_description_at((uint32_t)w->package_scroll,desc,sizeof(desc))==0){ksnprintf(line,sizeof(line),"Visible package detail: %s",desc);TC(cx+12,cy+ch-40,line,C_SUBTEXT,C_BASE,cw2-24);}T(cx+12,cy+ch-22,"Read-only registry metadata. Use ArchiveEx/terminal for explicit install or remove; no dependency solver.",C_OVERLAY0,C_BASE);}
+static void packages_key(exp_win_t *w,int k){if(k==KEY_UP&&w->package_scroll>0)w->package_scroll--;else if(k==KEY_DOWN)w->package_scroll++;else if(k==KEY_PGUP){w->package_scroll-=6;if(w->package_scroll<0)w->package_scroll=0;}else if(k==KEY_PGDN)w->package_scroll+=6;}
+static void diag_run(exp_win_t *w){w->diag_rc[0]=net_udp_selftest();w->diag_rc[1]=ntp_selftest();w->diag_rc[2]=tzif_selftest();w->diag_rc[3]=rtc_write_selftest();w->diag_rc[4]=mouse_packet_selftest();w->diag_rc[5]=tzst_repo_selftest();w->diag_done=1;int bad=0;for(int i=0;i<6;i++)if(w->diag_rc[i]<0)bad++;exp_notify(bad?"Self-test dashboard: failures found":"Self-test dashboard: all checks passed",bad?C_RED:C_GREEN);}
+static int diag_write_line(int fd,const char *line){uint32_t n=(uint32_t)kstrlen(line);return vfs_write(fd,(const uint8_t*)line,n)==(int64_t)n?0:-1;}
+static void diag_export(exp_win_t *w){if(!catfs_vfs_is_mounted()){exp_notify("Diagnostic export needs mounted CatFS /data",C_RED);return;}(void)vfs_mkdir("/data/uiu",0755);(void)vfs_mkdir("/data/uiu/reports",0755);char path[128],line[192],num[16];int fd=-1;for(int n=1;n<=99;n++){kstrcpy(path,"/data/uiu/reports/diagnostics-");if(n<10)kstrcat(path,"0");kuitoa((uint32_t)n,num,10);kstrcat(path,num);kstrcat(path,".txt");fd=vfs_open(path,O_WRONLY|O_CREAT|O_EXCL,0644);if(fd>=0)break;}if(fd<0){exp_notify("No free diagnostic report slot",C_RED);return;}int bad=0;ksnprintf(line,sizeof(line),"ATMKoala diagnostic report\nUptime ticks: %u\nCatFS /data: mounted\nDetected ATA drives: %d\nUserNet state: %s\n",sched_uptime_ticks(),disk_count,unm_state_text(g_unm.state));if(diag_write_line(fd,line)<0)bad=1;for(int i=0;i<6&&!bad;i++){ksnprintf(line,sizeof(line),"Selftest %d: %s\n",i+1,!w->diag_done?"not-run":(w->diag_rc[i]<0?"failed":"passed"));if(diag_write_line(fd,line)<0)bad=1;}vfs_close(fd);if(bad){(void)vfs_unlink(path);exp_notify("Diagnostic export failed; partial removed",C_RED);return;}w->diag_export_count++;kstrcpy(line,"Diagnostic report saved: ");kstrcat(line,path);exp_notify(line,C_GREEN);}
+static void draw_diagnostics(exp_win_t *w){static const char *names[]={"UDP frame parser","NTP reply parser","TZif transition parser","RTC write encoding","PS/2 mouse packet","Package repo parser"};int cx=CX(w),cy=CY(w),cw2=CW(w),ch=CH(w),y=cy+12;R(cx,cy,cw2,ch,C_BASE);T(cx+12,y,"SELF-TEST DASHBOARD",C_LAVENDER,C_BASE);y+=24;T(cx+12,y,"Press R to run bounded non-destructive checks in this window.",C_SUBTEXT,C_BASE);y+=24;for(int i=0;i<6;i++){color32_t c=!w->diag_done?C_OVERLAY0:(w->diag_rc[i]<0?C_RED:C_GREEN);R(cx+12,y+3,9,9,c);BOX(cx+12,y+3,9,9,C_SURFACE2);T(cx+30,y,names[i],C_TEXT,C_BASE);T(cx+300,y,!w->diag_done?"not run":(w->diag_rc[i]<0?"FAILED":"passed"),c,C_BASE);y+=22;}T(cx+12,cy+ch-38,"No network traffic, RTC write, mount/unmount, package install or disk mutation occurs here.",C_OVERLAY0,C_BASE);T(cx+12,cy+ch-20,"R run checks  |  E export status to CatFS  |  It is not a substitute for QEMU/hardware validation.",C_OVERLAY0,C_BASE);}
+static void diagnostics_key(exp_win_t *w,int k){if(k=='r'||k=='R')diag_run(w);else if(k=='e'||k=='E')diag_export(w);}
+static int storage_first_drive(void){for(int i=0;i<DISK_MAX_DRIVES;i++)if(disk_drives[i].present)return i;return -1;}
+static int storage_step_drive(int current,int step){for(int n=1;n<=DISK_MAX_DRIVES;n++){int i=(current+step*n+DISK_MAX_DRIVES*2)%DISK_MAX_DRIVES;if(disk_drives[i].present)return i;}return current;}
+static void storage_refresh(exp_win_t *w){w->storage_result=-1;for(int i=0;i<PART_MAX_ENTRIES;i++)kstrcpy(w->storage_fs[i],"-");if(w->storage_drive<0||w->storage_drive>=DISK_MAX_DRIVES||!disk_drives[w->storage_drive].present)return;if(mbr_read(w->storage_drive,&w->storage_mbr)<0)return;w->storage_result=w->storage_mbr.valid?0:-2;if(w->storage_result==0)for(int i=0;i<PART_MAX_ENTRIES;i++)if(w->storage_mbr.entries[i].type)kstrncpy(w->storage_fs[i],mbr_probe_filesystem(w->storage_drive,&w->storage_mbr.entries[i]),sizeof(w->storage_fs[i])-1);}
+static void draw_storage(exp_win_t *w){int cx=CX(w),cy=CY(w),cw2=CW(w),ch=CH(w),y=cy+12;char line[160],num[16];R(cx,cy,cw2,ch,C_BASE);T(cx+12,y,"STORAGE & MBR VIEWER",C_LAVENDER,C_BASE);y+=24;if(w->storage_drive<0){T(cx+12,y,"No detected ATA drive. This view does not probe or write hardware.",C_SUBTEXT,C_BASE);return;}int d=w->storage_drive;kstrcpy(line,"Drive hd");line[8]=(char)('a'+d);line[9]=0;kstrcat(line,"  ");kstrcat(line,disk_drives[d].model[0]?disk_drives[d].model:"ATA Disk");kstrcat(line,"  ");kuitoa(disk_capacity_mib(d),num,10);kstrcat(line,num);kstrcat(line," MiB");T(cx+12,y,line,C_TEXT,C_BASE);y+=22;if(w->storage_result<0){T(cx+12,y,w->storage_result==-2?"MBR signature invalid or absent.":"MBR read failed.",C_RED,C_BASE);T(cx+12,cy+ch-22,"Left/Right choose detected drive  |  R read MBR again  |  Read-only",C_OVERLAY0,C_BASE);return;}T(cx+12,y,"#  Boot  Type                 Start LBA     Sectors       Probe",C_SUBTEXT,C_BASE);y+=20;for(int i=0;i<PART_MAX_ENTRIES;i++){mbr_entry_t *e=&w->storage_mbr.entries[i];if(!e->type){ksnprintf(line,sizeof(line),"%d  -     (empty)",i+1);}else{ksnprintf(line,sizeof(line),"%d  %s  %-20s %-12u %-12u %s",i+1,e->status==0x80?"yes":"no",part_type_name(e->type),e->lba_start,e->sector_count,w->storage_fs[i]);}T(cx+16,y,line,e->type?C_TEXT:C_OVERLAY0,C_BASE);y+=20;}T(cx+12,cy+ch-38,"MBR values and ext2/CatFS signatures are inspection only; no partition editor is present.",C_OVERLAY0,C_BASE);T(cx+12,cy+ch-20,"Left/Right choose detected drive  |  R refresh from sector 0  |  No write operation",C_OVERLAY0,C_BASE);}
+static void storage_key(exp_win_t *w,int k){if(k==KEY_LEFT||k==KEY_RIGHT){int next=storage_step_drive(w->storage_drive,k==KEY_LEFT?-1:1);if(next!=w->storage_drive){w->storage_drive=next;storage_refresh(w);}}else if(k=='r'||k=='R')storage_refresh(w);}
+static void draw_help(exp_win_t *w){static const char *title[]={"DESKTOP & WINDOWS","FILES, VIEWER & NOTEPAD","STORAGE, NETWORK & DIAGNOSTICS","PACKAGE & COMPATIBILITY BOUNDARIES"};static const char *body[][6]={{"Alt+T Terminal   Alt+F Files   Alt+E Notepad   Alt+S Settings","Alt+I Processes   Alt+U Mounts   Alt+N Network   Alt+K Packages","Alt+B Storage/MBR   Alt+D Self-test   Alt+H Help","Ctrl+Alt+Left/Right snap active window; Ctrl+Tab brings next window front.","Windows resize with the bottom-right grip. The desktop has no compositor,","virtual desktops, or generalized shortcut-remapping service."},{"Files: F literal filename find, I read-only properties, N new folder.","C/M/P copy or move regular files only; T moves a CatFS /data item to Trash.","Viewer opens PNG, JPEG, BMP and native PPM P6 screenshots/Paint output.","Notepad: Ctrl+S save, Ctrl+F literal find, Ctrl+G go to line.","Unsaved Notepad/Journal close requires Enter to discard or Esc to cancel.","Searches are bounded to current in-memory directory/document buffers."},{"Storage & MBR is inspection only: it reads sector 0 on an explicitly selected drive.","Mount Manager needs explicit confirmation for unmount. Ext2 mount remains terminal-selected.","Network Profiles changes only saved existing UserNet profiles; C invokes existing connect.","Self-test R executes local parser/input tests. E explicitly writes a text report to CatFS.","No background NTP, wireless scan, automatic repair or hidden disk action is performed.",""},{"Package Details is a read-only native registry view; ArchiveEx performs explicit validated install.","Repository download is bounded clear-text HTTP only: no TLS, redirects, auth or dependency solver.","Ext2 writing stays constrained to guarded existing direct blocks; no allocation or metadata update.","ATMKoala is not POSIX-certified and does not run arbitrary Linux binaries or dynamic glibc/musl apps.","Use the project status document for the authoritative verified compatibility scope.",""}};int cx=CX(w),cy=CY(w),cw2=CW(w),ch=CH(w),page=w->help_page;if(page<0||page>3)page=0;R(cx,cy,cw2,ch,C_BASE);T(cx+12,cy+12,"HELP CENTER",C_LAVENDER,C_BASE);T(cx+12,cy+34,title[page],C_TEXT,C_BASE);int y=cy+62;for(int i=0;i<6;i++){if(!body[page][i][0])continue;TW(cx+14,y,body[page][i],C_SUBTEXT,C_BASE,cw2-28,2);y+=34;}char nav[64];ksnprintf(nav,sizeof(nav),"Page %d/4   Left/Right change page   Esc closes",page+1);T(cx+12,cy+ch-20,nav,C_OVERLAY0,C_BASE);}
+static void help_key(exp_win_t *w,int k){if(k==KEY_ESC){for(int i=0;i<DE.win_count;i++)if(&DE.wins[i]==w){win_close(i);return;}}else if(k==KEY_LEFT&&w->help_page>0)w->help_page--;else if(k==KEY_RIGHT&&w->help_page<3)w->help_page++;}
 
 /* Screenshots are recorded as raw binary RGB PPM (P6). This format needs no
  * encoder, streams one row at a time and is intentionally distinct from the
@@ -1419,10 +1463,18 @@ static void notepad_insert(exp_win_t *w,const char *src,int n){
     w->ed_cursor+=n; w->ed_len+=n; w->ed_buf[w->ed_len]=0; w->ed_dirty=1;
 }
 
+static int ed_query_match(const char *text,int avail,const char *query,int n){if(avail<n||n<1)return 0;for(int i=0;i<n;i++)if(text[i]!=query[i])return 0;return 1;}
+static void ed_scroll_to_cursor(exp_win_t *w){int line=0;for(int i=0;i<w->ed_cursor&&i<w->ed_len;i++)if(w->ed_buf[i]=='\n')line++;w->ed_scroll=line;}
+static void ed_find_next(exp_win_t *w){if(!w->ed_query_len){exp_notify("Enter text to find",C_YELLOW);return;}int start=w->ed_cursor<w->ed_len?w->ed_cursor+1:0;for(int pass=0;pass<2;pass++){for(int i=start;i+w->ed_query_len<=w->ed_len;i++)if(ed_query_match(w->ed_buf+i,w->ed_len-i,w->ed_query,w->ed_query_len)){w->ed_cursor=i;ed_scroll_to_cursor(w);exp_notify("Text match selected",C_GREEN);return;}start=0;}exp_notify("Text not found",C_YELLOW);}
+static void ed_goto_line(exp_win_t *w){int target=0;for(int i=0;i<w->ed_query_len;i++)target=target*10+(w->ed_query[i]-'0');if(target<1){exp_notify("Line number must be positive",C_YELLOW);return;}int line=1,pos=0;while(pos<w->ed_len&&line<target){if(w->ed_buf[pos++]=='\n')line++;}if(line!=target){exp_notify("Line is outside this document",C_YELLOW);return;}w->ed_cursor=pos;w->ed_scroll=line-1;}
+static void ed_prompt_key(exp_win_t *w,int k){if(k==KEY_ESC){w->ed_prompt=0;return;}if(k=='\n'||k=='\r'){int prompt=w->ed_prompt;w->ed_prompt=0;if(prompt==1)ed_find_next(w);else ed_goto_line(w);return;}if(k=='\b'||k==127){if(w->ed_query_len>0)w->ed_query[--w->ed_query_len]=0;return;}if(k>=0x20&&k<=0x7E&&w->ed_query_len<(int)sizeof(w->ed_query)-1&&(w->ed_prompt!=2||(k>='0'&&k<='9'))){w->ed_query[w->ed_query_len++]=(char)k;w->ed_query[w->ed_query_len]=0;}}
 static void notepad_key(exp_win_t *w,int k,int ctrl){
+    if(w->ed_prompt){ed_prompt_key(w,k);return;}
     /* keyboard_poll() encodes Ctrl+S as ASCII DC3 (0x13). Keep the
      * printable form too for alternative input back ends. */
     if(k==0x13 || (ctrl && (k=='s'||k=='S'))){notepad_save(w);return;}
+    if(k==0x06 || (ctrl && (k=='f'||k=='F'))){w->ed_prompt=1;w->ed_query[0]=0;w->ed_query_len=0;return;}
+    if(k==0x07 || (ctrl && (k=='g'||k=='G'))){w->ed_prompt=2;w->ed_query[0]=0;w->ed_query_len=0;return;}
     if(k==KEY_LEFT){if(w->ed_cursor>0)w->ed_cursor--;return;}
     if(k==KEY_RIGHT){if(w->ed_cursor<w->ed_len)w->ed_cursor++;return;}
     if(k==KEY_HOME){while(w->ed_cursor>0&&w->ed_buf[w->ed_cursor-1]!='\n')w->ed_cursor--;return;}
@@ -1483,8 +1535,7 @@ static void draw_editor(exp_win_t *w){
     }
     HL(cx,cy+ch-16,cw2,C_SURFACE0);
     R(cx,cy+ch-15,cw2,15,C_MANTLE);
-    if(w->app==APP_NOTEPAD||w->app==APP_JOURNAL)
-        TF(cx+4,cy+ch-14,w->ed_dirty?C_PEACH:C_SUBTEXT,C_MANTLE,"%s  Ctrl+S save  |  arrows/Home/End  |  %d bytes",w->ed_dirty?"Modified":"Saved",w->ed_len);
+    if(w->app==APP_NOTEPAD||w->app==APP_JOURNAL){char status[112];if(w->ed_close_confirm)kstrcpy(status,"Unsaved text: Enter discard  |  Esc cancel");else if(w->ed_prompt==1){ksnprintf(status,sizeof(status),"Find: %s_  Enter next  |  Esc cancel",w->ed_query);}else if(w->ed_prompt==2){ksnprintf(status,sizeof(status),"Go to line: %s_  Enter go  |  Esc cancel",w->ed_query);}else kstrcpy(status,w->ed_dirty?"Modified  Ctrl+S save  |  Ctrl+F find  |  Ctrl+G line":"Saved  Ctrl+S save  |  Ctrl+F find  |  Ctrl+G line");TF(cx+4,cy+ch-14,w->ed_close_confirm||w->ed_prompt?C_YELLOW:(w->ed_dirty?C_PEACH:C_SUBTEXT),C_MANTLE,status);}
     else
         TF(cx+4,cy+ch-14,C_SUBTEXT,C_MANTLE,"%s  line %d  PgUp/Dn/arrows",fmt_name(fmt),w->ed_scroll+1);
 }
@@ -1693,7 +1744,7 @@ static void draw_about(exp_win_t *w){
 
 /* ─── Launcher ───────────────────────────────────────────── */
 static const struct{const char *name,*desc;app_id_t app;color32_t ic;}
-LA[23]={
+LA[30]={
     {"Terminal","Command workspace",APP_TERMINAL,RGB(0x48,0x6E,0x85)},
     {"Files",   "Local file browser",APP_FILES,RGB(0x8F,0x7A,0x3A)},
     {"Notepad", "Plain text editor",APP_NOTEPAD,RGB(0x44,0x76,0x4B)},
@@ -1717,14 +1768,21 @@ LA[23]={
     {"Paint",   "Local pixel canvas",APP_PAINT,RGB(0x9A,0x58,0x50)},
     {"Viewer",  "Text and image viewer",APP_VIEWER,RGB(0x60,0x75,0x8B)},
     {"ArchiveEx", "Validated TAR.ZST/ATPK installer",APP_ARCHIVEEX,RGB(0x7B,0x66,0x28)},
+    {"Processes", "Read-only task snapshot",APP_PROCESSES,RGB(0x75,0x5B,0x75)},
+    {"Mounts", "CatFS / Ext2 status",APP_MOUNTS,RGB(0x5A,0x70,0x7A)},
+    {"Network", "Saved UserNet profiles",APP_NETWORK,RGB(0x43,0x72,0x69)},
+    {"Packages", "Installed package metadata",APP_PACKAGES,RGB(0x7B,0x66,0x28)},
+    {"Self-test", "Bounded diagnostics",APP_DIAGNOSTICS,RGB(0x70,0x70,0x68)},
+    {"Storage", "Read-only MBR viewer",APP_STORAGE,RGB(0x6B,0x67,0x5A)},
+    {"Help", "Built-in safety reference",APP_HELP,RGB(0x5E,0x68,0x75)},
 };
-#define NLA 23
-#define LA_COLS 3
+#define NLA 30
+#define LA_COLS (NLA>28?5:4)
 #define LA_ROWS ((NLA+LA_COLS-1)/LA_COLS)
 
 static void launcher_rect(int *ox,int *oy,int *ow,int *oh){
-    int w=522,h=LA_ROWS*46+104;
-    *ox=6;*oy=DE_SCR_H-DE_TASKBAR_H-h-4;*ow=w;*oh=h;
+    int w=DE_SCR_W-12,h=LA_ROWS*46+104;if(w>680)w=680;if(w<420)w=420;
+    *ox=6;*oy=DE_SCR_H-DE_TASKBAR_H-h-4;if(*oy<2)*oy=2;*ow=w;*oh=h;
 }
 static void draw_launcher(void){
     int lx,ly,lw,lh;launcher_rect(&lx,&ly,&lw,&lh);
@@ -1741,9 +1799,9 @@ static void draw_launcher(void){
         int sel=(i==DE.launcher_sel);color32_t bg=sel?C_SURFACE1:C_MANTLE,fg=sel?C_TEXT:C_SUBTEXT;
         R(ix,iy,cellw-8,42,bg);if(sel)BOX(ix,iy,cellw-8,42,C_BLUE);
         draw_app_icon(LA[i].app,ix+5,iy+6,30,LA[i].ic,bg);
-        T(ix+43,iy+7,LA[i].name,fg,bg);T(ix+43,iy+22,LA[i].desc,C_SUBTEXT,bg);
+        TC(ix+43,iy+7,LA[i].name,fg,bg,cellw-55);TC(ix+43,iy+22,LA[i].desc,C_SUBTEXT,bg,cellw-55);
     }
-    VL(lx+lw/2,ly+54,LA_ROWS*46,C_SURFACE2);
+    for(int c=1;c<LA_COLS;c++)VL(lx+12+c*cellw-4,ly+54,LA_ROWS*46,C_SURFACE2);
     R(lx+2,ly+lh-32,lw-4,30,C_SURFACE0);T(lx+12,ly+lh-21,"All native applications",C_SUBTEXT,C_SURFACE0);
     T(lx+lw-156,ly+lh-21,"Enter open  arrows browse",C_SUBTEXT,C_SURFACE0);
 }
@@ -1808,7 +1866,7 @@ int exp_open_app(app_id_t app, const char *path){
         kstrcpy(w->title,(path&&path[0])?path:"Viewer");
         if(path&&path[0]) {
             file_fmt_t ff=fmt_detect(NULL,0,path);
-            if(ff==FMT_PNG || ff==FMT_JPEG || ff==FMT_BMP) image_viewer_load(w,path);
+            if(ff==FMT_PNG || ff==FMT_JPEG || ff==FMT_BMP || ff==FMT_PPM) image_viewer_load(w,path);
             else { ed_load(w,path); w->ed_readonly=1; }
         }
         break;
@@ -1817,7 +1875,7 @@ int exp_open_app(app_id_t app, const char *path){
         w->w=620;w->h=330;archiveex_load(w,path);break;
     case APP_IMAGE_VIEWER:
         kstrcpy(w->title,(path&&path[0])?path:"Image Viewer");
-        w->w=640;w->h=460;if(path&&path[0])image_viewer_load(w,path);else kstrcpy(w->image.error,"Open a PNG or JPEG from Files.");
+        w->w=640;w->h=460;if(path&&path[0])image_viewer_load(w,path);else kstrcpy(w->image.error,"Open a PNG, JPEG, BMP or PPM P6 file in Files.");
         break;
     case APP_SYSMON:
         kstrcpy(w->title,"System Monitor");
@@ -1828,6 +1886,27 @@ int exp_open_app(app_id_t app, const char *path){
     case APP_EVENTLOG:
         kstrcpy(w->title,"Events");
         w->w=650;w->h=410;w->log_mode=0;w->log_scroll=0;break;
+    case APP_PROCESSES:
+        kstrcpy(w->title,"Process Viewer");
+        w->w=650;w->h=350;w->proc_scroll=0;break;
+    case APP_MOUNTS:
+        kstrcpy(w->title,"Mount Manager");
+        w->w=620;w->h=320;w->mount_action=0;break;
+    case APP_NETWORK:
+        kstrcpy(w->title,"Network Profiles");
+        w->w=680;w->h=350;w->network_sel=g_unm.active_profile>=0?g_unm.active_profile:0;break;
+    case APP_PACKAGES:
+        kstrcpy(w->title,"Package Details");
+        w->w=650;w->h=340;w->package_scroll=0;break;
+    case APP_DIAGNOSTICS:
+        kstrcpy(w->title,"Self-test Dashboard");
+        w->w=560;w->h=300;w->diag_done=0;w->diag_export_count=0;break;
+    case APP_STORAGE:
+        kstrcpy(w->title,"Storage & MBR Viewer");
+        w->w=660;w->h=310;w->storage_drive=storage_first_drive();storage_refresh(w);break;
+    case APP_HELP:
+        kstrcpy(w->title,"Help Center");
+        w->w=680;w->h=350;w->help_page=0;break;
     case APP_POWER:
         kstrcpy(w->title,"Power");
         w->w=510;w->h=230;w->power_action=0;break;
@@ -1906,12 +1985,13 @@ int exp_gui_open(const char *id){
 }
 static void win_close(int idx){
     if(idx<0||idx>=DE.win_count) return;
-    exp_win_t *closing=&DE.wins[idx];if(closing->app==APP_EXTERNAL&&closing->ext_slot>=0&&closing->ext_slot<gui_app_count){exp_gui_context_t ctx;gui_context(&ctx,closing);if(gui_apps[closing->ext_slot].close)gui_apps[closing->ext_slot].close(&ctx);}if(closing->app==APP_IMAGE_VIEWER||closing->app==APP_VIEWER)atm_image_release(&closing->image);if(closing->app==APP_ARCHIVEEX)archiveex_release(closing);
+    exp_win_t *closing=&DE.wins[idx];if((closing->app==APP_NOTEPAD||closing->app==APP_JOURNAL)&&closing->ed_dirty){if(!closing->ed_close_confirm){closing->ed_close_confirm=1;exp_notify("Unsaved text: Enter discard, Esc cancel",C_YELLOW);}return;}if(closing->app==APP_EXTERNAL&&closing->ext_slot>=0&&closing->ext_slot<gui_app_count){exp_gui_context_t ctx;gui_context(&ctx,closing);if(gui_apps[closing->ext_slot].close)gui_apps[closing->ext_slot].close(&ctx);}if(closing->app==APP_IMAGE_VIEWER||closing->app==APP_VIEWER)atm_image_release(&closing->image);if(closing->app==APP_ARCHIVEEX)archiveex_release(closing);
     for(int i=idx;i<DE.win_count-1;i++) DE.wins[i]=DE.wins[i+1];
     DE.win_count--;
     if(DE.active>=DE.win_count) DE.active=DE.win_count-1;
 }
 
+static void win_snap(exp_win_t *w,int right){if(!w)return;if(w->maximized){w->maximized=0;}else{w->px=w->x;w->py=w->y;w->pw=w->w;w->ph=w->h;}w->x=right?DE_SCR_W/2:0;w->y=0;w->w=DE_SCR_W/2;w->h=DE_SCR_H-DE_TASKBAR_H;}
 static void win_max(exp_win_t *w){
     if(w->maximized){
         w->x=w->px;w->y=w->py;w->w=w->pw;w->h=w->ph;w->maximized=0;
@@ -1999,6 +2079,13 @@ static void draw_win_content(exp_win_t *w){
     case APP_SYSMON:   draw_sysmon(w);   break;
     case APP_SYSINFO:  draw_sysinfo(w);  break;
     case APP_EVENTLOG: draw_eventlog(w); break;
+    case APP_PROCESSES: draw_processes(w); break;
+    case APP_MOUNTS: draw_mounts(w); break;
+    case APP_NETWORK: draw_network(w); break;
+    case APP_PACKAGES: draw_packages(w); break;
+    case APP_DIAGNOSTICS: draw_diagnostics(w); break;
+    case APP_STORAGE: draw_storage(w); break;
+    case APP_HELP: draw_help(w); break;
     case APP_POWER:    draw_power_app(w); break;
     case APP_SCREENSHOTS: draw_screenshots(w); break;
     case APP_SETTINGS: draw_settings(w); break;
@@ -2092,11 +2179,16 @@ void exp_init(void){
     if(wallpaper_file&&wallpaper_file[0]&&wallpaper_file_set(wallpaper_file,0)<0)exp_notify("Saved wallpaper could not be loaded",C_YELLOW);
     DE.last_clock=pit_get_ticks();
     DE.last_activity_tick=DE.last_clock;
-    (void)vbe_double_buffer_enable();
+    if(vbe_double_buffer_enable()<0){
+        exp_notify("Full-frame buffer unavailable; direct rendering may tear",C_YELLOW);
+        sdk_serial_write("[vbe] exp-backbuffer-direct\n");
+    }else if(vbe_double_buffer_uses_static())sdk_serial_write("[vbe] exp-backbuffer-static\n");
+    else sdk_serial_write("[vbe] exp-backbuffer-heap\n");
     vbe_clear(C_BASE);
 }
 
 void exp_run(void){
+    if(!vbe_desktop_supported())return;
     exp_init();
     full_redraw();
     exp_open_app(APP_TERMINAL,NULL);
@@ -2157,9 +2249,16 @@ void exp_run(void){
         }
         /* Alt combos */
         if(alt2){
-            if(k=='\n'||k=='\r'){exp_open_app(APP_TERMINAL,NULL);full_redraw();continue;}
+            if(k=='\n'||k=='\r'||k=='t'||k=='T'){exp_open_app(APP_TERMINAL,NULL);full_redraw();continue;}
             if(k=='f'||k=='F'){exp_open_app(APP_FILES,"/");full_redraw();continue;}
             if(k=='m'||k=='M'){exp_open_app(APP_SYSMON,NULL);full_redraw();continue;}
+            if(k=='i'||k=='I'){exp_open_app(APP_PROCESSES,NULL);full_redraw();continue;}
+            if(k=='u'||k=='U'){exp_open_app(APP_MOUNTS,NULL);full_redraw();continue;}
+            if(k=='n'||k=='N'){exp_open_app(APP_NETWORK,NULL);full_redraw();continue;}
+            if(k=='k'||k=='K'){exp_open_app(APP_PACKAGES,NULL);full_redraw();continue;}
+            if(k=='d'||k=='D'){exp_open_app(APP_DIAGNOSTICS,NULL);full_redraw();continue;}
+            if(k=='b'||k=='B'){exp_open_app(APP_STORAGE,NULL);full_redraw();continue;}
+            if(k=='h'||k=='H'){exp_open_app(APP_HELP,NULL);full_redraw();continue;}
             if(k=='e'||k=='E'){exp_open_app(APP_NOTEPAD,NULL);full_redraw();continue;}
             if(k=='s'||k=='S'){exp_open_app(APP_SETTINGS,NULL);full_redraw();continue;}
             if(k=='p'||k=='P'){exp_open_app(APP_POWER,NULL);full_redraw();continue;}
@@ -2167,6 +2266,7 @@ void exp_run(void){
             if(k==KEY_F5&&DE.active>=0&&DE.active<DE.win_count){
                 win_max(&DE.wins[DE.active]); full_redraw(); continue;
             }
+            if(ctrl2&&DE.active>=0&&DE.active<DE.win_count){if(k==KEY_LEFT){win_snap(&DE.wins[DE.active],0);full_redraw();continue;}if(k==KEY_RIGHT){win_snap(&DE.wins[DE.active],1);full_redraw();continue;}}
             /* Move window */
             if(DE.active>=0&&DE.active<DE.win_count&&!DE.wins[DE.active].maximized){
                 exp_win_t *aw=&DE.wins[DE.active];
@@ -2213,7 +2313,7 @@ void exp_run(void){
         }
         /* Ctrl+Tab cycle */
         if(ctrl2&&k==KEY_TAB&&DE.win_count>0){
-            DE.active=(DE.active+1)%DE.win_count;
+            int next=(DE.active+1)%DE.win_count;win_to_front(next);
             full_redraw(); continue;
         }
         /* Ctrl+number */
@@ -2225,6 +2325,7 @@ void exp_run(void){
         if(DE.active>=0&&DE.active<DE.win_count){
             int active_before=DE.active;
             exp_win_t *w=&DE.wins[DE.active];
+            if(w->ed_close_confirm){if(k=='\n'||k=='\r'){w->ed_dirty=0;w->ed_close_confirm=0;win_close(DE.active);full_redraw();continue;}if(k==KEY_ESC){w->ed_close_confirm=0;exp_notify("Close cancelled",C_SUBTEXT);full_redraw();continue;}continue;}
             switch(w->app){
             case APP_TERMINAL: term_key(w,k); break;
             case APP_FILES:    fm_key(w,k);   break;
@@ -2234,6 +2335,13 @@ void exp_run(void){
             case APP_NOTEPAD:  notepad_key(w,k,ctrl2); break;
             case APP_JOURNAL:  notepad_key(w,k,ctrl2); break;
             case APP_EVENTLOG: eventlog_key(w,k); break;
+            case APP_PROCESSES: processes_key(w,k); break;
+            case APP_MOUNTS: mountmgr_key(w,k); break;
+            case APP_NETWORK: network_key(w,k); break;
+            case APP_PACKAGES: packages_key(w,k); break;
+            case APP_DIAGNOSTICS: diagnostics_key(w,k); break;
+            case APP_STORAGE: storage_key(w,k); break;
+            case APP_HELP: help_key(w,k); break;
             case APP_POWER:    power_key(w,k); break;
             case APP_SCREENSHOTS: screenshots_key(w,k); break;
             case APP_SETTINGS: settings_key(w,k); break;

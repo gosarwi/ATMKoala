@@ -11,7 +11,8 @@ typedef enum {
     ATM_IMAGE_NONE=0,
     ATM_IMAGE_BMP,
     ATM_IMAGE_PNG,
-    ATM_IMAGE_JPEG
+    ATM_IMAGE_JPEG,
+    ATM_IMAGE_PPM
 } atm_image_format_t;
 
 typedef struct {

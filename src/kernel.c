@@ -2731,6 +2731,8 @@ void dispatch(char *line) {
             sdk_serial_write("[posix] image\n"); int im=atm_image_selftest();
             sdk_serial_write("[vbe] fastpath\n"); int vf=vbe_fastpath_selftest();
             if(vf==0)sdk_serial_write("[vbe] fastpath-ok\n");else sdk_serial_write("[vbe] fastpath-fail\n");
+            sdk_serial_write("[vbe] geometry\n"); int vg=vbe_geometry_selftest();
+            if(vg==0)sdk_serial_write("[vbe] geometry-ok\n");else sdk_serial_write("[vbe] geometry-fail\n");
             sdk_serial_write("[mouse] packet\n"); int msp=mouse_packet_selftest();
             if(msp==0)sdk_serial_write("[mouse] packet-ok\n");else sdk_serial_write("[mouse] packet-fail\n");
             sdk_serial_write("[udp] parser\n"); int udp=net_udp_selftest();
@@ -2763,7 +2765,7 @@ void dispatch(char *line) {
             if(rp==0)sdk_serial_write("[pkg] repo-ok\n");else sdk_serial_write("[pkg] repo-fail\n");
             sdk_serial_write("[ixpy] parser-raw-source\n"); int xp=ixpy_selftest();
             if(xp==0)sdk_serial_write("[ixpy] parser-raw-source-ok\n");else sdk_serial_write("[ixpy] parser-raw-source-fail\n");
-            cprintf("posix test: paging=%s uaccess=%s vfs-posix=%s syscall-usercopy=%s process-fd=%s native-dir=%s native-cpl3=%s linux-l0=%s linux-descriptor=%s linux-session=%s linux-v22=%s linux-l1=%s linux-l3=%s exec=%s cpl3-wait=%s cpl3-signal=%s static-libc=%s pipe-ipc=%s image-bmp=%s vbe-fastpath=%s udp-parser=%s ntp-parser=%s http-parser=%s mp3-parser=%s hda-detect=%s uhd600-detect=%s hardware-status=%s installer-ui=%s init-runtime=%s exp-utf8-layout=%s timezone=%s tzif-parser=%s pkg-repo=%s ixpy-parser=%s\n",pt==0?"OK":"FAIL",ua==0?"OK":"FAIL",ps==0?"OK":"FAIL",sc==0?"OK":"FAIL",nf==0?"OK":"FAIL",nd==0?"OK":"FAIL",na==0?"OK":"FAIL",la==0?"OK":"FAIL",ld==0?"OK":"FAIL",ls==0?"OK":"FAIL",lv22==0?"OK":"FAIL",l1==0?"OK":"FAIL",l3==0?"OK":"FAIL",ex==0?"OK":"FAIL",cw==0?"OK":"FAIL",csig==0?"OK":"FAIL",lc==0?"OK":"FAIL",ipc==0?"OK":"FAIL",im==0?"OK":"FAIL",vf==0?"OK":"FAIL",udp==0?"OK":"FAIL",ntp==0?"OK":"FAIL",hp==0?"OK":"FAIL",mp==0?"OK":"FAIL",hd==0?"OK":"FAIL",ug==0?"OK":"FAIL",hs==0?"OK":"FAIL",ii==0?"OK":"FAIL",ir==0?"OK":"FAIL",eu==0?"OK":"FAIL",tzr==0?"OK":"FAIL",tzif==0?"OK":"FAIL",rp==0?"OK":"FAIL",xp==0?"OK":"FAIL");
+            cprintf("posix test: paging=%s uaccess=%s vfs-posix=%s syscall-usercopy=%s process-fd=%s native-dir=%s native-cpl3=%s linux-l0=%s linux-descriptor=%s linux-session=%s linux-v22=%s linux-l1=%s linux-l3=%s exec=%s cpl3-wait=%s cpl3-signal=%s static-libc=%s pipe-ipc=%s image-bmp=%s vbe-fastpath=%s vbe-geometry=%s udp-parser=%s ntp-parser=%s http-parser=%s mp3-parser=%s hda-detect=%s uhd600-detect=%s hardware-status=%s installer-ui=%s init-runtime=%s exp-utf8-layout=%s timezone=%s tzif-parser=%s pkg-repo=%s ixpy-parser=%s\n",pt==0?"OK":"FAIL",ua==0?"OK":"FAIL",ps==0?"OK":"FAIL",sc==0?"OK":"FAIL",nf==0?"OK":"FAIL",nd==0?"OK":"FAIL",na==0?"OK":"FAIL",la==0?"OK":"FAIL",ld==0?"OK":"FAIL",ls==0?"OK":"FAIL",lv22==0?"OK":"FAIL",l1==0?"OK":"FAIL",l3==0?"OK":"FAIL",ex==0?"OK":"FAIL",cw==0?"OK":"FAIL",csig==0?"OK":"FAIL",lc==0?"OK":"FAIL",ipc==0?"OK":"FAIL",im==0?"OK":"FAIL",vf==0?"OK":"FAIL",vg==0?"OK":"FAIL",udp==0?"OK":"FAIL",ntp==0?"OK":"FAIL",hp==0?"OK":"FAIL",mp==0?"OK":"FAIL",hd==0?"OK":"FAIL",ug==0?"OK":"FAIL",hs==0?"OK":"FAIL",ii==0?"OK":"FAIL",ir==0?"OK":"FAIL",eu==0?"OK":"FAIL",tzr==0?"OK":"FAIL",tzif==0?"OK":"FAIL",rp==0?"OK":"FAIL",xp==0?"OK":"FAIL");
         } else if(!kstrcmp(argv[1],"ring3")) {
             if(!session_is_privileged()){ C_ERR(); con_writeln("posix ring3: administrator privileges required"); C_NRM(); goto done; }
             C_WRN(); con_write("Type RING3 to enter destructive CPL 3 diagnostic: "); C_NRM();
@@ -2810,6 +2812,7 @@ void dispatch(char *line) {
     }
     else if (!kstrcmp(cmd,"de")) {
         if(!use_vbe || boot_text_mode){C_ERR();con_writeln("de: unavailable in Text mode");C_NRM();goto done;}
+        if(!vbe_desktop_supported()){C_ERR();cprintf("de: needs at least %ux%u; boot framebuffer is %ux%u. Select a higher graphical mode.\n",VBE_DESKTOP_MIN_WIDTH,VBE_DESKTOP_MIN_HEIGHT,vbe.width,vbe.height);C_NRM();goto done;}
         /* Apply desktop style before launching */
         const char *dstyle = sysconf_get("desktop","style");
         if (dstyle && dstyle[0]) {
@@ -3189,7 +3192,7 @@ void kernel_main(uint64_t mb_magic, uint64_t mbinfo_phys) {
      * Bring up keyboard polling first, then enable IRQs; mouse is GUI-only. */
     keyboard_init();
     cpu_sti();
-    if (use_vbe && !boot_text_mode) mouse_init((int)vbe.width,(int)vbe.height);
+    if (use_vbe && !boot_text_mode && vbe_desktop_supported()) mouse_init((int)vbe.width,(int)vbe.height);
     sdk_serial_init();
     serial_console_ready=1;
 
@@ -3244,7 +3247,7 @@ void kernel_main(uint64_t mb_magic, uint64_t mbinfo_phys) {
     if (atminit_boot() < 0) PANIC("atm-init: default runlevel failed");
     /* A VBE desktop promotes the standard multi-user boot to graphical.
      * Explicit single-user configurations remain untouched. */
-    if (use_vbe && atminit_runlevel()==ATM_RUNLEVEL_MULTI)
+    if (use_vbe && vbe_desktop_supported() && atminit_runlevel()==ATM_RUNLEVEL_MULTI)
         (void)atminit_set_runlevel(ATM_RUNLEVEL_GRAPHICAL);
     /* Apply kernel name if set */
     const char *kname = sysconf_get("kernel","kernel_name");
@@ -3314,10 +3317,15 @@ void kernel_main(uint64_t mb_magic, uint64_t mbinfo_phys) {
         con_clear();
         terminal_print_logo();
     } else if (use_vbe && !boot_text_mode) {
-        boot_graphical_splash();
-        exp_run();
-        con_clear();
-        terminal_print_logo();
+        if(!vbe_desktop_supported()){
+            con_writeln("Graphical framebuffer is below Exp minimum 640x480; using VBE console.");
+            cprintf("Boot framebuffer: %ux%u x%u. Select a higher graphical mode in the boot menu.\n",vbe.width,vbe.height,vbe.bpp);
+        }else{
+            boot_graphical_splash();
+            exp_run();
+            con_clear();
+            terminal_print_logo();
+        }
     } else if (boot_text_mode) {
         /* On GRUB implementations that retain a linear framebuffer for
          * gfxmode=text, this is rendered by vbe_console, not by 0xB8000. */

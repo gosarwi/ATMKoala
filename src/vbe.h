@@ -60,8 +60,19 @@ typedef struct {
 
 extern vbe_state_t vbe;
 
+/* Exp uses physical framebuffer pixels and needs this minimum usable desktop
+ * rectangle. A smaller boot framebuffer remains valid for the VBE console,
+ * but must not launch the fixed-minimum desktop widgets. */
+#define VBE_DESKTOP_MIN_WIDTH  640u
+#define VBE_DESKTOP_MIN_HEIGHT 480u
+
 /* Init from multiboot framebuffer tag */
 int  vbe_init(mb_fb_info_t *fb_info);
+/* True when the adopted boot framebuffer is large enough for Exp at its
+ * fixed 100% physical-pixel UI scale. This does not modeset hardware. */
+int  vbe_desktop_supported(void);
+/* Pure geometry regression; no framebuffer, hardware or allocation access. */
+int  vbe_geometry_selftest(void);
 
 /* Drawing primitives */
 void vbe_putpixel(int x, int y, color32_t c);
@@ -71,6 +82,9 @@ void vbe_putpixel(int x, int y, color32_t c);
 int  vbe_double_buffer_enable(void);
 void vbe_double_buffer_disable(void);
 void vbe_present(void);
+/* Read-only present-path telemetry for diagnostics and QEMU regression. */
+int  vbe_double_buffer_active(void);
+int  vbe_double_buffer_uses_static(void);
 void vbe_fill_rect(int x, int y, int w, int h, color32_t c);
 /* Blend a colour over the active VBE draw surface. Suitable for compact UI
  * overlays; full background blur needs a retained compositor and is absent. */

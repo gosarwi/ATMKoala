@@ -12,6 +12,7 @@
 #include "vfs.h"
 #include "util.h"
 #include "pit.h"
+#include "ossdk.h"
 #include <stdint.h>
 
 #define BG RGB(0xFA,0xFA,0xF7)
@@ -94,6 +95,11 @@ static void text(int x,int y,const char*s,color32_t fg,color32_t bg){ttf_render_
 static int inside(int px,int py,int x,int y,int w,int h){return px>=x&&py>=y&&px<x+w&&py<y+h;}
 static void button(int x,int y,int w,const char*label,int active){r(x,y,w,INSTALL_BUTTON_H,active?ACCENT:MUTED);box(x,y,w,INSTALL_BUTTON_H,active?ACCENT:LINE);text(x+12,y+8,label,active?PANEL:TEXT,active?ACCENT:MUTED);}
 static int primary_button_hit(int mx,int my,int px,int py){return inside(mx,my,px+INSTALL_PRIMARY_X,py+INSTALL_PRIMARY_Y,INSTALL_PRIMARY_W,INSTALL_BUTTON_H);}
+/* Treat both normal/keypad Enter representations and Space as activation.
+ * Space is deliberate only after the typed ERASE unlock, so it cannot bypass
+ * the destructive confirmation but provides a robust key fallback. */
+static int activate_key(int k){return k==KEY_ENTER||k=='\n'||k=='\r'||k==' ';}
+static int primary_activate(int erase_count,int k,int click,int hit){return erase_count==5&&(activate_key(k)||(click&&hit));}
 static int confirm_feed(int erase_count,int k){static const char confirm[]="ERASE";if(k==KEY_BACKSPACE)return erase_count>0?erase_count-1:0;if(k>0&&k<0x80&&erase_count<5){char ch=(char)k;if(ch>='a'&&ch<='z')ch-=32;return ch==confirm[erase_count]?erase_count+1:(ch==confirm[0]?1:0);}return erase_count;}
 static void disk_icon(int x,int y,color32_t c){box(x,y,28,18,c);r(x+3,y+4,22,7,c);r(x+4,y+13,4,2,PANEL);r(x+20,y+13,3,2,OK);}
 static void installer_cursor(void){
@@ -263,6 +269,7 @@ int installer_selftest(void){
     if(!inside(121,304,22,304,100,30)||inside(22,334,22,304,100,30))return -1;
     if(!primary_button_hit(INSTALL_PRIMARY_X,INSTALL_PRIMARY_Y,0,0)||primary_button_hit(INSTALL_PRIMARY_X+INSTALL_PRIMARY_W,INSTALL_PRIMARY_Y,0,0))return -1;
     int erase=0;const char *word="ERASE";for(int i=0;word[i];i++)erase=confirm_feed(erase,word[i]);if(erase!=5||confirm_feed(erase,'\r')!=5)return -1;
+    if(!activate_key(KEY_ENTER)||!activate_key('\n')||!activate_key(' ')||!primary_activate(5,KEY_ENTER,0,0)||!primary_activate(5,0,1,1)||primary_activate(4,KEY_ENTER,0,0))return -1;
     if(!user_name_is_valid("new-user")||user_name_is_valid("9invalid")||user_name_is_valid("bad name"))return -1;
     /* A layout strip remains bounded for the smallest valid visual span. */
     uint32_t total=10000,start=2048,sectors=2048,begin=(start*430u)/total,span=(sectors*430u)/total;
@@ -275,6 +282,7 @@ void installer_run(void){
     int buffered=(vbe_double_buffer_enable()==0);
     if(target>=0)layout_default(target,&start,&sectors);
     installer_preflight(target,preflight,sizeof(preflight));
+    sdk_serial_write("[installer] ready\n");
     for(;;){
         frame(step,target,start,sectors,tz_idx,root_password,account_name,account_password,setup_field,erase_count,status,preflight,show_log);
         int k=keyboard_poll();mouse_state_t mouse_sample;const mouse_state_t*m=mouse_snapshot(&mouse_sample)?&mouse_sample:NULL;int click=m&&m->available&&(m->buttons&1)&&!(last_buttons&1);if(m)last_buttons=m->buttons;
@@ -283,11 +291,11 @@ void installer_run(void){
         if(show_log&&click&&primary_button_hit(m->x,m->y,px,py)){show_log=0;continue;}
         if(k==KEY_ESC&&show_log){show_log=0;continue;}
         if(k==KEY_ESC || (click&&step<4&&inside(m->x,m->y,px+22,py+355,120,30))){installer_log_add("Installer cancelled");kmemset(root_password,0,sizeof(root_password));kmemset(account_password,0,sizeof(account_password));if(buffered)vbe_double_buffer_disable();return;}
-        if(step==0&&(k=='\n'||k=='\r'||(click&&primary_button_hit(m->x,m->y,px,py)))){installer_log_add("Next slide: select target disk");step=1;continue;}
+        if(step==0&&(activate_key(k)||(click&&primary_button_hit(m->x,m->y,px,py)))){installer_log_add("Next slide: select target disk");sdk_serial_write("[installer] step-target\n");step=1;continue;}
         if(step==1){
             if(k==KEY_LEFT||k==KEY_UP||(click&&inside(m->x,m->y,px+22,py+300,120,30))){target=next_drive(target,-1);layout_default(target,&start,&sectors);installer_preflight(target,preflight,sizeof(preflight));installer_log_add("Target disk changed: previous available drive");}
             else if(k==KEY_RIGHT||k==KEY_DOWN||(click&&inside(m->x,m->y,px+154,py+300,120,30))){target=next_drive(target,1);layout_default(target,&start,&sectors);installer_preflight(target,preflight,sizeof(preflight));installer_log_add("Target disk changed: next available drive");}
-            else if((k=='\n'||k=='\r'||(click&&primary_button_hit(m->x,m->y,px,py)))&&target>=0){layout_default(target,&start,&sectors);installer_log_add("Next slide: plan CatFS partition layout");step=2;}
+            else if((activate_key(k)||(click&&primary_button_hit(m->x,m->y,px,py)))&&target>=0){layout_default(target,&start,&sectors);installer_log_add("Next slide: plan CatFS partition layout");sdk_serial_write("[installer] step-layout\n");step=2;}
             continue;
         }
         if(step==2){
@@ -296,7 +304,7 @@ void installer_run(void){
             else if(k==KEY_UP||(click&&inside(m->x,m->y,px+352,py+304,100,30))){if(sectors<=drive_sectors(target)-start-INSTALL_SIZE_STEP_SECTORS)sectors+=INSTALL_SIZE_STEP_SECTORS;layout_clamp(target,&start,&sectors);}
             else if(k==KEY_DOWN||(click&&inside(m->x,m->y,px+242,py+304,100,30))){if(sectors>INSTALL_MIN_SECTORS+INSTALL_SIZE_STEP_SECTORS)sectors-=INSTALL_SIZE_STEP_SECTORS;else sectors=INSTALL_MIN_SECTORS;layout_clamp(target,&start,&sectors);}
             else if(k==KEY_HOME){layout_default(target,&start,&sectors);}
-            else if((k=='\n'||k=='\r'||(click&&primary_button_hit(m->x,m->y,px,py)))&&sectors>=INSTALL_MIN_SECTORS){setup_field=0;installer_log_add("Next slide: first-boot locale and accounts");step=3;}
+            else if((activate_key(k)||(click&&primary_button_hit(m->x,m->y,px,py)))&&sectors>=INSTALL_MIN_SECTORS){setup_field=0;installer_log_add("Next slide: first-boot locale and accounts");sdk_serial_write("[installer] step-setup\n");step=3;}
             continue;
         }
         if(step==3){
@@ -314,16 +322,18 @@ void installer_run(void){
                 if(root_len<4)status="Root password must have at least 4 characters.";
                 else if(name_len&&(!user_name_is_valid(account_name)||user_find(account_name)))status="Local user must be a new name: letters first, then letters/digits/_/-.";
                 else if(name_len&&account_len<4)status="Local user password must have at least 4 characters.";
-                else {erase_count=0;status="";installer_log_add("Next slide: destructive ERASE confirmation");step=4;}
+                else {erase_count=0;status="";installer_log_add("Next slide: destructive ERASE confirmation");sdk_serial_write("[installer] step-confirm\n");step=4;}
             }
             continue;
         }
         if(step==4){
             /* Enter is an activation key, not an ERASE character. Evaluate the
              * already unlocked action before accepting any printable input. */
-            if(erase_count==5&&(k=='\n'||k=='\r'||(click&&primary_button_hit(m->x,m->y,px,py)))){int result;step=5;status="Writing MBR, CatFS, timezone and local accounts…";installer_log_add(status);frame(step,target,start,sectors,tz_idx,root_password,account_name,account_password,setup_field,erase_count,status,preflight,0);result=install_target_partition(target,start,sectors,installer_timezones[tz_idx],root_password,account_name,account_password);if(result==0){installer_completion_splash();step=6;status="Installation completed successfully.";}else{step=7;status="Installation failed after the destructive confirmation.";installer_log_add(status);installer_log_save();}}
-            else if(k=='\n'||k=='\r')status="Type ERASE exactly before activation.";
-            else {int before=erase_count;erase_count=confirm_feed(erase_count,k);if(erase_count==5&&before!=5)installer_log_add("ERASE accepted: Install button unlocked");}
+            int hit=click&&primary_button_hit(m->x,m->y,px,py);
+            if(primary_activate(erase_count,k,click,hit)){int result;step=5;status="Writing MBR, CatFS, timezone and local accounts…";installer_log_add("Install activation accepted after ERASE confirmation");installer_log_add(status);sdk_serial_write("[installer] destructive-activation\n");frame(step,target,start,sectors,tz_idx,root_password,account_name,account_password,setup_field,erase_count,status,preflight,0);result=install_target_partition(target,start,sectors,installer_timezones[tz_idx],root_password,account_name,account_password);if(result==0){sdk_serial_write("[installer] transaction-ok\n");installer_completion_splash();step=6;status="Installation completed successfully.";}else{sdk_serial_write("[installer] transaction-fail\n");step=7;status="Installation failed after the destructive confirmation.";installer_log_add(status);installer_log_save();}}
+            else if(activate_key(k))status="Type ERASE exactly before activation.";
+            else if(k==KEY_UTF8)status="ERASE must use the English keyboard layout.";
+            else {int before=erase_count;erase_count=confirm_feed(erase_count,k);if(erase_count==5&&before!=5){status="ERASE accepted. Press Enter, Space, or click Install.";installer_log_add("ERASE accepted: Install button unlocked");sdk_serial_write("[installer] erase-unlocked\n");}}
             continue;
         }
         if(step==6||step==7){if(k=='\n'||k=='\r'||(click&&primary_button_hit(m->x,m->y,px,py))){installer_log_add("Installer session finished");installer_log_save();kmemset(root_password,0,sizeof(root_password));kmemset(account_password,0,sizeof(account_password));if(buffered)vbe_double_buffer_disable();return;}}
